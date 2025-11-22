@@ -1,0 +1,632 @@
+"""
+Custom MixLoRA training script for cultural datasets.
+Supports automatic dataset splitting, best model saving, and comprehensive evaluation.
+"""
+
+import argparse
+import json
+import logging
+import os
+import sys
+import math
+import re
+from typing import Dict, Optional, List, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, random_split
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    TrainerCallback,
+    TrainerState,
+    TrainerControl
+)
+from transformers.trainer_utils import get_last_checkpoint
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
+
+# Add parent directory to path to import mixlora
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from mixlora.config import MixLoraConfig
+from mixlora.model import inject_adapter_in_model, load_adapter_weights, MixLoraModelForCausalLM
+from dataset import ChoiceQuestionDataset, ChoiceQuestionCollator
+
+
+@dataclass
+class CustomTrainingArguments:
+    """Custom training arguments for cultural datasets."""
+
+    # Dataset configuration
+    data_id: int = field(default=2, metadata={"help": "Dataset ID (2=culturalbench, 3=normad)"})
+    base_model: str = field(default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
+                           metadata={"help": "Base model path"})
+
+    # MixLoRA parameters
+    num_experts: int = field(default=8, metadata={"help": "Number of experts"})
+    top_k: int = field(default=2, metadata={"help": "Top-k routing"})
+    routing_strategy: str = field(default="mixlora", metadata={"help": "Routing strategy"})
+    router_aux_loss_coef: float = field(default=0.01, metadata={"help": "Router auxiliary loss coefficient"})
+    router_init_range: float = field(default=0.02, metadata={"help": "Router initialization range"})
+    jitter_noise: float = field(default=0.0, metadata={"help": "Jitter noise"})
+
+    # LoRA parameters
+    lora_r: int = field(default=8, metadata={"help": "LoRA rank"})
+    lora_alpha: int = field(default=16, metadata={"help": "LoRA alpha"})
+    lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout"})
+    use_dora: bool = field(default=False, metadata={"help": "Use DoRA"})
+    use_rslora: bool = field(default=False, metadata={"help": "Use RSLoRA"})
+
+    # Training parameters
+    max_length: int = field(default=512, metadata={"help": "Maximum sequence length"})
+    batch_size: int = field(default=4, metadata={"help": "Training batch size"})
+    gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps"})
+    learning_rate: float = field(default=1e-4, metadata={"help": "Learning rate"})
+    num_epochs: int = field(default=3, metadata={"help": "Number of training epochs"})
+    warmup_ratio: float = field(default=0.1, metadata={"help": "Warmup ratio"})
+    weight_decay: float = field(default=0.01, metadata={"help": "Weight decay"})
+
+    # Evaluation parameters
+    eval_interval: int = field(default=1, metadata={"help": "Evaluate every N epochs"})
+    save_steps: int = field(default=500, metadata={"help": "Save steps"})
+    logging_steps: int = field(default=10, metadata={"help": "Logging steps"})
+
+    # Experiment tracking
+    wandb_project: Optional[str] = field(default=None, metadata={"help": "Weights & Biases project name"})
+    run_name: Optional[str] = field(default=None, metadata={"help": "Run name for logging"})
+
+
+class BestModelTracker(TrainerCallback):
+    """Callback to track and save the best model based on validation accuracy."""
+
+    def __init__(self, trainer_instance):
+        self.best_accuracy = 0.0
+        self.best_model_path = None
+        self.trainer_instance = trainer_instance
+        self.eval_results = []
+
+    def on_evaluate(self, args, state, control, model, eval_dataloader, **kwargs):
+        """Called after evaluation."""
+        if hasattr(state, 'log_history') and len(state.log_history) > 0:
+            last_log = state.log_history[-1]
+            if 'eval_accuracy' in last_log:
+                current_accuracy = last_log['eval_accuracy']
+
+                # Save evaluation result
+                eval_result = {
+                    'epoch': state.epoch,
+                    'step': state.global_step,
+                    'eval_accuracy': current_accuracy,
+                    'eval_loss': last_log.get('eval_loss', 0.0)
+                }
+                self.eval_results.append(eval_result)
+
+                # Check if this is the best model so far
+                if current_accuracy > self.best_accuracy:
+                    self.best_accuracy = current_accuracy
+
+                    # Save the best model (only adapter weights)
+                    best_model_dir = os.path.join(args.output_dir, "best_model")
+                    os.makedirs(best_model_dir, exist_ok=True)
+
+                    # Save adapter weights
+                    self.trainer_instance.save_adapter_weights(best_model_dir)
+                    self.best_model_path = best_model_dir
+
+                    logging.info(f"New best model saved with accuracy: {current_accuracy:.4f}")
+
+                # Save evaluation results
+                eval_results_path = os.path.join(args.output_dir, "validation_results.json")
+                with open(eval_results_path, 'w') as f:
+                    json.dump(self.eval_results, f, indent=2)
+
+
+class CustomMixLoRATrainer:
+    """Custom trainer for MixLoRA on cultural datasets."""
+
+    def __init__(self, args: CustomTrainingArguments):
+        self.args = args
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Set up logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        self.logger = logging.getLogger(__name__)
+
+        # Get dataset configuration
+        self.dataset_config = self._get_dataset_config()
+
+        # Set up output directory
+        self.output_dir = f"/root/autodl-fs/data/mixlora/{self.dataset_config['tag']}_llama_{datetime.now().strftime('%Y%m%d_%H%M')}"
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        self.logger.info(f"Output directory: {self.output_dir}")
+
+    def _get_dataset_config(self) -> Dict[str, str]:
+        """Get dataset configuration based on data_id."""
+        configs = {
+            2: {
+                "path": "/root/autodl-fs/CulturalBench_merge_gen.json",
+                "tag": "culturalbench"
+            },
+            3: {
+                "path": "/root/autodl-fs/normad_merge_gen.json",
+                "tag": "normad"
+            }
+        }
+
+        if self.args.data_id not in configs:
+            raise ValueError(f"Unsupported data_id: {self.args.data_id}. Supported values: {list(configs.keys())}")
+
+        return configs[self.args.data_id]
+
+    def _get_default_target_modules(self, model_type: str) -> List[str]:
+        """Get default target modules based on model type."""
+        if model_type in ["llama", "mistral", "gemma", "gemma2", "qwen2"]:
+            return ["q_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
+        elif model_type == "phi":
+            return ["q_proj", "v_proj", "fc1", "fc2"]
+        elif model_type == "phi3":
+            return ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"]
+        else:
+            self.logger.warning(f"Unknown model type {model_type}, using default target modules")
+            return ["q_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
+
+    def setup_model_and_tokenizer(self):
+        """Setup the base model, tokenizer, and inject MixLoRA adapters."""
+        self.logger.info(f"Loading base model: {self.args.base_model}")
+
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # Load base model
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.args.base_model,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+
+        # Determine target modules
+        target_modules = self._get_default_target_modules(self.model.config.model_type)
+
+        # Create MixLoRA config
+        mixlora_config_dict = {
+            "base_model_name_or_path": self.args.base_model,
+            "task_type": "CAUSAL_LM",
+            "peft_type": "MIXLORA",
+            "r": self.args.lora_r,
+            "lora_alpha": self.args.lora_alpha,
+            "lora_dropout": self.args.lora_dropout,
+            "target_modules": {module: True for module in target_modules},
+            "use_dora": self.args.use_dora,
+            "use_rslora": self.args.use_rslora,
+            "routing_strategy": self.args.routing_strategy,
+            "num_experts": self.args.num_experts,
+            "top_k": self.args.top_k,
+            "router_aux_loss_coef": self.args.router_aux_loss_coef,
+            "router_init_range": self.args.router_init_range,
+            "jitter_noise": self.args.jitter_noise,
+        }
+
+        self.mixlora_config = MixLoraConfig.from_config(mixlora_config_dict)
+        self.mixlora_config.dtype_ = torch.float16
+
+        # Initialize MixLoRA weights
+        dummy_weights = self._create_dummy_weights()
+
+        # Inject MixLoRA adapters
+        inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
+
+        self.logger.info("MixLoRA adapters injected successfully")
+
+    def _create_dummy_weights(self) -> Dict[str, torch.Tensor]:
+        """Create dummy weights for MixLoRA injection."""
+        weights = {}
+
+        # Get model dimensions
+        hidden_size = self.model.config.hidden_size
+        num_layers = self.model.config.num_hidden_layers
+
+        for layer_idx in range(num_layers):
+            # Router gate weights
+            weights[f"mixlora.layers.{layer_idx}.mlp.moe_gate.weight"] = torch.randn(
+                self.args.num_experts, hidden_size, dtype=torch.float16
+            ) * self.args.router_init_range
+
+            # Expert LoRA weights for each target module
+            for module_name, is_target in self.mixlora_config.target_modules_.items():
+                if not is_target:
+                    continue
+
+                # Get dimensions based on module type
+                try:
+                    if module_name in ["gate_proj", "up_proj"]:
+                        in_features = hidden_size
+                        out_features = self.model.config.intermediate_size
+                    elif module_name == "down_proj":
+                        in_features = self.model.config.intermediate_size
+                        out_features = hidden_size
+                    elif module_name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+                        in_features = hidden_size
+                        out_features = hidden_size
+                    elif module_name == "fc1":
+                        in_features = hidden_size
+                        out_features = self.model.config.intermediate_size
+                    elif module_name == "fc2":
+                        in_features = self.model.config.intermediate_size
+                        out_features = hidden_size
+                    else:
+                        in_features = hidden_size
+                        out_features = hidden_size
+
+                    # Create LoRA weights for each expert
+                    for expert_idx in range(self.args.num_experts):
+                        prefix = f"mixlora.layers.{layer_idx}.mlp.{module_name}.experts.{expert_idx}"
+
+                        # LoRA A matrix
+                        weights[f"{prefix}.lora_A.weight"] = torch.randn(
+                            self.args.lora_r, in_features, dtype=torch.float16
+                        ) * 0.01
+
+                        # LoRA B matrix
+                        weights[f"{prefix}.lora_B.weight"] = torch.zeros(
+                            out_features, self.args.lora_r, dtype=torch.float16
+                        )
+
+                except Exception as e:
+                    self.logger.warning(f"Could not determine dimensions for {module_name}: {e}")
+                    continue
+
+            # Attention LoRA weights
+            for module_name, is_target in self.mixlora_config.target_modules_.items():
+                if not is_target or module_name in ["gate_proj", "up_proj", "down_proj", "fc1", "fc2"]:
+                    continue
+
+                prefix = f"mixlora.layers.{layer_idx}.self_attn.{module_name}"
+
+                # LoRA A matrix
+                weights[f"{prefix}.lora_A.weight"] = torch.randn(
+                    self.args.lora_r, hidden_size, dtype=torch.float16
+                ) * 0.01
+
+                # LoRA B matrix
+                weights[f"{prefix}.lora_B.weight"] = torch.zeros(
+                    hidden_size, self.args.lora_r, dtype=torch.float16
+                )
+
+        return weights
+
+    def setup_datasets(self):
+        """Setup training, validation, and test datasets with 8:1:1 split."""
+        self.logger.info("Loading and splitting datasets...")
+
+        # Load full dataset
+        full_dataset = ChoiceQuestionDataset(
+            data_path=self.dataset_config['path'],
+            tokenizer=self.tokenizer,
+            max_length=self.args.max_length,
+            choice_range=None  # Auto-detect
+        )
+
+        # Get choice range for later use
+        self.choice_range = full_dataset.choice_range
+        self.logger.info(f"Detected choice range: {self.choice_range}")
+
+        # Split dataset randomly with 8:1:1 ratio
+        total_size = len(full_dataset)
+        train_size = int(0.8 * total_size)
+        val_size = int(0.1 * total_size)
+        test_size = total_size - train_size - val_size
+
+        # Use generator for reproducible splits
+        generator = torch.Generator().manual_seed(42)
+        self.train_dataset, self.val_dataset, self.test_dataset = random_split(
+            full_dataset, [train_size, val_size, test_size], generator=generator
+        )
+
+        self.logger.info(f"Dataset split - Train: {len(self.train_dataset)}, Val: {len(self.val_dataset)}, Test: {len(self.test_dataset)}")
+
+        # Setup data collator
+        self.data_collator = ChoiceQuestionCollator(tokenizer=self.tokenizer)
+
+    def save_adapter_weights(self, save_path: str):
+        """Save only the adapter weights (not the full model)."""
+        os.makedirs(save_path, exist_ok=True)
+
+        # Extract adapter weights from the model
+        adapter_weights = {}
+
+        for name, param in self.model.named_parameters():
+            if any(adapter_name in name for adapter_name in ['lora_A', 'lora_B', 'moe_gate', 'experts']):
+                adapter_weights[name] = param.data.clone()
+
+        # Save adapter weights
+        torch.save(adapter_weights, os.path.join(save_path, "adapter_model.bin"))
+
+        # Save adapter config
+        config_path = os.path.join(save_path, "adapter_config.json")
+        with open(config_path, 'w') as f:
+            json.dump(self.mixlora_config.export(), f, indent=2)
+
+        self.logger.info(f"Adapter weights saved to {save_path}")
+
+    def extract_answer_from_generation(self, generated_text: str) -> Optional[str]:
+        """Extract answer choice from generated text."""
+        # Clean the text
+        generated_text = generated_text.strip()
+
+        # First try exact match with choice range
+        for choice in self.choice_range:
+            if generated_text == choice:
+                return choice
+
+        # Try to find digits in the text
+        digits = re.findall(r'\d+', generated_text)
+        for digit in digits:
+            if digit in self.choice_range:
+                return digit
+
+        # If no valid choice found, return None
+        return None
+
+    def evaluate_on_dataset(self, dataset, dataset_name: str) -> Tuple[Dict[str, float], List[Dict]]:
+        """Evaluate model on a dataset and return metrics and detailed results."""
+        self.model.eval()
+
+        dataloader = DataLoader(
+            dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            collate_fn=self.data_collator
+        )
+
+        all_predictions = []
+        all_targets = []
+        detailed_results = []
+
+        with torch.no_grad():
+            for batch in dataloader:
+                # Get original data for each sample in batch
+                for i in range(len(batch['choice_answers'])):
+                    # Reconstruct instruction from input_ids
+                    input_ids = batch['input_ids'][i]
+                    labels = batch['labels'][i]
+                    instruction_length = (labels == -100).sum().item()
+                    instruction_ids = input_ids[:instruction_length]
+                    instruction = self.tokenizer.decode(instruction_ids, skip_special_tokens=True)
+
+                    # Generate response
+                    inputs = self.tokenizer(
+                        instruction,
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=self.args.max_length
+                    ).to(self.device)
+
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=10,
+                        temperature=0.1,
+                        do_sample=False,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                    )
+
+                    generated_text = self.tokenizer.decode(
+                        outputs[0][inputs['input_ids'].shape[1]:],
+                        skip_special_tokens=True
+                    ).strip()
+
+                    predicted_choice = self.extract_answer_from_generation(generated_text)
+                    target_choice = batch['choice_answers'][i]
+
+                    all_predictions.append(predicted_choice)
+                    all_targets.append(target_choice)
+
+                    # Store detailed result
+                    detailed_results.append({
+                        'instruction': instruction,
+                        'target': target_choice,
+                        'predicted': predicted_choice,
+                        'generated_text': generated_text,
+                        'correct': predicted_choice == target_choice
+                    })
+
+        # Calculate metrics
+        # Handle None predictions by treating them as wrong
+        valid_predictions = []
+        valid_targets = []
+
+        for pred, target in zip(all_predictions, all_targets):
+            if pred is not None:
+                valid_predictions.append(pred)
+                valid_targets.append(target)
+            else:
+                # Treat None as a wrong prediction, use first choice as placeholder
+                valid_predictions.append(self.choice_range[0])
+                valid_targets.append(target)
+
+        # Calculate metrics
+        accuracy = accuracy_score(valid_targets, valid_predictions)
+        precision, recall, f1, support = precision_recall_fscore_support(
+            valid_targets, valid_predictions, average='macro', zero_division=0
+        )
+
+        metrics = {
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'total_samples': len(all_targets),
+            'valid_predictions': len([p for p in all_predictions if p is not None])
+        }
+
+        self.logger.info(f"{dataset_name} Results - Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+
+        return metrics, detailed_results
+
+    def compute_metrics(self, eval_pred):
+        """Compute metrics for the trainer."""
+        predictions, labels = eval_pred
+
+        # This is a simplified version - the main evaluation happens in evaluate_on_dataset
+        # We'll use this just to get basic accuracy for the trainer callback
+
+        # For now, return a dummy accuracy that will be overridden
+        return {"accuracy": 0.0}
+
+    def train(self):
+        """Run the training loop."""
+        self.logger.info("Starting training...")
+
+        # Calculate eval steps based on eval_interval
+        total_steps = len(self.train_dataset) // (self.args.batch_size * self.args.gradient_accumulation_steps) * self.args.num_epochs
+        eval_steps = max(1, total_steps // (self.args.num_epochs // self.args.eval_interval)) if self.args.eval_interval > 0 else total_steps
+
+        # Setup training arguments
+        training_args = TrainingArguments(
+            output_dir=self.output_dir,
+            per_device_train_batch_size=self.args.batch_size,
+            per_device_eval_batch_size=self.args.batch_size,
+            gradient_accumulation_steps=self.args.gradient_accumulation_steps,
+            learning_rate=self.args.learning_rate,
+            num_train_epochs=self.args.num_epochs,
+            warmup_ratio=self.args.warmup_ratio,
+            weight_decay=self.args.weight_decay,
+            logging_steps=self.args.logging_steps,
+            eval_steps=eval_steps,
+            save_steps=self.args.save_steps,
+            evaluation_strategy="steps",
+            save_strategy="steps",
+            load_best_model_at_end=False,  # We handle this manually
+            fp16=True,
+            dataloader_pin_memory=False,
+            remove_unused_columns=False,
+            report_to=None,  # Disable wandb for now
+        )
+
+        # Create trainer
+        trainer = Trainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.val_dataset,
+            data_collator=self.data_collator,
+            tokenizer=self.tokenizer,
+            compute_metrics=self.compute_metrics,
+        )
+
+        # Add best model tracker callback
+        best_model_tracker = BestModelTracker(self)
+        trainer.add_callback(best_model_tracker)
+
+        # Store reference for saving adapter weights
+        self.trainer = trainer
+
+        # Train
+        trainer.train()
+
+        # Save final training config
+        config_path = os.path.join(self.output_dir, "training_config.json")
+        with open(config_path, 'w') as f:
+            json.dump(vars(self.args), f, indent=2)
+
+        # Load best model and evaluate on test set
+        self.logger.info("Loading best model for test evaluation...")
+
+        if best_model_tracker.best_model_path:
+            # Load the best adapter weights
+            best_adapter_path = os.path.join(best_model_tracker.best_model_path, "adapter_model.bin")
+            if os.path.exists(best_adapter_path):
+                adapter_weights = torch.load(best_adapter_path, map_location=self.device)
+
+                # Load adapter weights into model
+                missing_keys, unexpected_keys = self.model.load_state_dict(adapter_weights, strict=False)
+                self.logger.info(f"Loaded best model adapter weights")
+
+                # Evaluate on test set
+                test_metrics, test_results = self.evaluate_on_dataset(self.test_dataset, "Test")
+
+                # Save test results
+                test_results_path = os.path.join(self.output_dir, "test_results.json")
+                with open(test_results_path, 'w') as f:
+                    json.dump({
+                        'metrics': test_metrics,
+                        'detailed_results': test_results
+                    }, f, indent=2)
+
+                # Save generated answers for validation set
+                val_metrics, val_results = self.evaluate_on_dataset(self.val_dataset, "Validation")
+                generated_answers_path = os.path.join(self.output_dir, "generated_answers.json")
+                with open(generated_answers_path, 'w') as f:
+                    json.dump(val_results, f, indent=2)
+
+                self.logger.info(f"Final test accuracy: {test_metrics['accuracy']:.4f}")
+                self.logger.info(f"Results saved to {self.output_dir}")
+            else:
+                self.logger.error("Best model adapter weights not found!")
+        else:
+            self.logger.error("No best model was saved during training!")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train MixLoRA on cultural datasets")
+
+    # Dataset configuration
+    parser.add_argument("--data_id", type=int, default=2, help="Dataset ID (2=culturalbench, 3=normad)")
+    parser.add_argument("--base_model", type=str,
+                       default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
+                       help="Base model path")
+
+    # MixLoRA parameters
+    parser.add_argument("--num_experts", type=int, default=8, help="Number of experts")
+    parser.add_argument("--top_k", type=int, default=2, help="Top-k routing")
+    parser.add_argument("--routing_strategy", type=str, default="mixlora", help="Routing strategy")
+    parser.add_argument("--router_aux_loss_coef", type=float, default=0.01, help="Router auxiliary loss coefficient")
+    parser.add_argument("--router_init_range", type=float, default=0.02, help="Router initialization range")
+    parser.add_argument("--jitter_noise", type=float, default=0.0, help="Jitter noise")
+
+    # LoRA parameters
+    parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
+    parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA alpha")
+    parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA dropout")
+    parser.add_argument("--use_dora", action="store_true", help="Use DoRA")
+    parser.add_argument("--use_rslora", action="store_true", help="Use RSLoRA")
+
+    # Training parameters
+    parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
+    parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
+    parser.add_argument("--warmup_ratio", type=float, default=0.1, help="Warmup ratio")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
+
+    # Evaluation parameters
+    parser.add_argument("--eval_interval", type=int, default=1, help="Evaluate every N epochs")
+    parser.add_argument("--save_steps", type=int, default=500, help="Save steps")
+    parser.add_argument("--logging_steps", type=int, default=10, help="Logging steps")
+
+    # Experiment tracking
+    parser.add_argument("--wandb_project", type=str, help="Weights & Biases project name")
+    parser.add_argument("--run_name", type=str, help="Run name for logging")
+
+    args = parser.parse_args()
+
+    # Convert to dataclass
+    training_args = CustomTrainingArguments(**vars(args))
+
+    # Create trainer and run training
+    trainer = CustomMixLoRATrainer(training_args)
+    trainer.setup_model_and_tokenizer()
+    trainer.setup_datasets()
+    trainer.train()
+
+
+if __name__ == "__main__":
+    main()

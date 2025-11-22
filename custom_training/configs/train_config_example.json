@@ -1,0 +1,37 @@
+{
+  "base_model": "meta-llama/Llama-2-7b-hf",
+  "dataset_path": "path/to/your/train_dataset.json",
+  "validation_dataset_path": "path/to/your/val_dataset.json",
+  "output_dir": "./mixlora_choice_model",
+
+  "num_experts": 8,
+  "top_k": 2,
+  "routing_strategy": "mixlora",
+  "router_aux_loss_coef": 0.01,
+  "router_init_range": 0.02,
+  "jitter_noise": 0.0,
+
+  "lora_r": 8,
+  "lora_alpha": 16,
+  "lora_dropout": 0.05,
+  "use_dora": false,
+  "use_rslora": false,
+
+  "max_length": 512,
+  "batch_size": 4,
+  "gradient_accumulation_steps": 4,
+  "learning_rate": 1e-4,
+  "num_epochs": 3,
+  "warmup_ratio": 0.1,
+  "weight_decay": 0.01,
+
+  "validation_split": 0.1,
+  "eval_steps": 100,
+  "save_steps": 500,
+  "logging_steps": 10,
+
+  "choice_range": ["1", "2", "3", "4"],
+
+  "wandb_project": "mixlora-choice-questions",
+  "run_name": "llama2-7b-choice-qa"
+}
