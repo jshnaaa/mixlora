@@ -17,13 +17,9 @@ from datetime import datetime
 # Set memory optimization environment variables first
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# Use single GPU training for stability with large batch size for 48G GPU
-# Users can override this by setting CUDA_VISIBLE_DEVICES before running
-if "CUDA_VISIBLE_DEVICES" not in os.environ:
-    # Use only the first GPU but with larger batch size for 48G memory
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    print(f"Using single GPU for training: {os.environ['CUDA_VISIBLE_DEVICES']}")
-    print("Note: Using single GPU with optimized batch size for 48G memory")
+# GPU configuration will be set based on command line argument
+# Users can still override by setting CUDA_VISIBLE_DEVICES before running
+# Note: The actual GPU setup is done in the trainer initialization
 
 import torch
 import torch.nn as nn
@@ -59,6 +55,7 @@ class CustomTrainingArguments:
     base_model: str = field(default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
                            metadata={"help": "Base model path"})
     output_dir: str = field(default="./mixlora_output", metadata={"help": "Output directory"})
+    num_gpu: int = field(default=2, metadata={"help": "Number of GPUs to use (1=single, 2=dual)"})
 
     # MixLoRA parameters
     num_experts: int = field(default=8, metadata={"help": "Number of experts"})
@@ -144,6 +141,10 @@ class CustomMixLoRATrainer:
 
     def __init__(self, args: CustomTrainingArguments):
         self.args = args
+
+        # Configure GPU setup based on num_gpu parameter
+        self._setup_gpu_configuration()
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # Set up logging
@@ -158,6 +159,35 @@ class CustomMixLoRATrainer:
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.logger.info(f"Output directory: {self.output_dir}")
+
+    def _setup_gpu_configuration(self):
+        """Setup GPU configuration based on num_gpu parameter."""
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            if torch.cuda.is_available():
+                available_gpus = torch.cuda.device_count()
+
+                if self.args.num_gpu == 1:
+                    # Single GPU training
+                    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+                    print(f"Configured for single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+                    print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
+                elif self.args.num_gpu == 2:
+                    # Dual GPU training
+                    if available_gpus >= 2:
+                        os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+                        print(f"Configured for dual-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+                        print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
+                    else:
+                        print(f"Warning: Requested {self.args.num_gpu} GPUs but only {available_gpus} available")
+                        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+                        print(f"Falling back to single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+                        self.args.num_gpu = 1  # Update the argument
+                else:
+                    raise ValueError(f"Unsupported num_gpu: {self.args.num_gpu}. Supported values: 1, 2")
+            else:
+                print("CUDA not available, using CPU")
+        else:
+            print(f"Using user-specified CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
 
     def _get_dataset_config(self) -> Dict[str, str]:
         """Get dataset configuration based on data_id."""
@@ -198,8 +228,9 @@ class CustomMixLoRATrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load base model for single GPU training with large batch size
-        self.logger.info(f"Loading model for single GPU training on: {self.device}")
+        # Load base model based on configured GPU setup
+        gpu_count = torch.cuda.device_count()
+        self.logger.info(f"Available GPUs: {gpu_count}, Configured to use: {self.args.num_gpu}")
 
         # Determine model dtype to avoid gradient scaling issues
         if torch.cuda.is_bf16_supported():
@@ -209,12 +240,20 @@ class CustomMixLoRATrainer:
             model_dtype = torch.float32
             self.logger.info("Using float32 for model weights (bfloat16 not supported)")
 
+        if self.args.num_gpu >= 2:
+            # Multi-GPU setup
+            self.logger.info("Loading model for dual-GPU training")
+        else:
+            # Single GPU setup
+            self.logger.info(f"Loading model for single GPU training on: {self.device}")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.args.base_model,
             torch_dtype=model_dtype,
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
+
         self.model_dtype = model_dtype
 
         self.logger.info(f"Model loaded successfully with dtype: {self.model_dtype}")
@@ -630,25 +669,33 @@ class CustomMixLoRATrainer:
         total_steps = len(self.train_dataset) // (self.args.batch_size * self.args.gradient_accumulation_steps) * self.args.num_epochs
         eval_steps = max(1, total_steps // (self.args.num_epochs // self.args.eval_interval)) if self.args.eval_interval > 0 else total_steps
 
-        # Check precision support for single GPU training
+        # Check precision support and GPU setup
+        gpu_count = torch.cuda.device_count()
         bf16_available = torch.cuda.is_bf16_supported()
         self.logger.info(f"BF16 support: {bf16_available}")
 
         # Use BF16 if available, otherwise FP32 to avoid gradient scaling issues
         if bf16_available:
-            self.logger.info("Using BF16 precision for single GPU training")
+            if self.args.num_gpu >= 2:
+                self.logger.info("Using BF16 precision for dual-GPU training")
+            else:
+                self.logger.info("Using BF16 precision for single GPU training")
             use_fp16 = False
             use_bf16 = True
         else:
-            self.logger.info("Using FP32 precision for single GPU training (BF16 not available)")
+            if self.args.num_gpu >= 2:
+                self.logger.info("Using FP32 precision for dual-GPU training (BF16 not available)")
+            else:
+                self.logger.info("Using FP32 precision for single GPU training (BF16 not available)")
             use_fp16 = False
             use_bf16 = False
 
-        # Calculate effective batch size
+        # Calculate effective batch size based on configured GPU count
         per_device_batch_size = self.args.batch_size
-        total_batch_size = per_device_batch_size * self.args.gradient_accumulation_steps
+        effective_gpu_count = min(self.args.num_gpu, gpu_count)
+        total_batch_size = per_device_batch_size * effective_gpu_count * self.args.gradient_accumulation_steps
         self.logger.info(f"Batch size per device: {per_device_batch_size}")
-        self.logger.info(f"Total effective batch size: {total_batch_size}")
+        self.logger.info(f"Total effective batch size: {total_batch_size} (Configured GPUs: {self.args.num_gpu}, Available: {gpu_count})")
 
         # Setup training arguments
         training_args = TrainingArguments(
@@ -678,9 +725,12 @@ class CustomMixLoRATrainer:
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             report_to=None,  # Disable wandb for now
-            # Single GPU settings
+            # Multi-GPU settings
             dataloader_num_workers=0,  # Avoid multiprocessing issues
             dataloader_drop_last=True,  # Ensure even batch distribution
+            # DDP settings for dual-GPU training
+            ddp_find_unused_parameters=False,  # Set to False for better performance
+            ddp_timeout=1800,  # 30 minutes timeout for large models
         )
 
         # Create trainer - use original collator, avoid DataParallel issues
@@ -761,6 +811,7 @@ def main():
                        default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
                        help="Base model path")
     parser.add_argument("--output_dir", type=str, default="./mixlora_output", help="Output directory")
+    parser.add_argument("--num_gpu", type=int, default=2, help="Number of GPUs to use (1=single, 2=dual)")
 
     # MixLoRA parameters
     parser.add_argument("--num_experts", type=int, default=8, help="Number of experts")

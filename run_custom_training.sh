@@ -2,13 +2,15 @@
 
 # Custom training script for MixLoRA on cultural datasets
 # Supports automatic dataset splitting, best model saving, and comprehensive evaluation
-# Usage: ./run_custom_training.sh [BACKBONE] [DATA_ID]
+# Usage: ./run_custom_training.sh [BACKBONE] [DATA_ID] [NUM_GPU]
 # BACKBONE: llama (default) | qwen
 # DATA_ID: 2 (culturalbench, default) | 3 (normad)
+# NUM_GPU: 2 (dual-GPU, default) | 1 (single-GPU)
 
 # Parse command line arguments
 BACKBONE=${1:-"llama"}  # Default to llama
 DATA_ID=${2:-2}         # Default to culturalbench
+NUM_GPU=${3:-2}         # Default to dual-GPU
 
 # Model configuration based on backbone
 case $BACKBONE in
@@ -38,6 +40,22 @@ case $DATA_ID in
         ;;
 esac
 
+# GPU configuration
+case $NUM_GPU in
+    1)
+        GPU_CONFIG="single"
+        echo "Configured for single-GPU training"
+        ;;
+    2)
+        GPU_CONFIG="dual"
+        echo "Configured for dual-GPU training"
+        ;;
+    *)
+        echo "Error: Unsupported NUM_GPU '$NUM_GPU'. Supported values: 1, 2"
+        exit 1
+        ;;
+esac
+
 # Define output directory
 OUTPUT_DIR="/root/autodl-fs/data/mixlora/${DATASET_TAG}_${BACKBONE}_$(date +%Y%m%d_%H%M)"
 
@@ -54,10 +72,20 @@ LORA_R=8
 LORA_ALPHA=16
 LORA_DROPOUT=0.05
 
-# Training parameters (optimized for 48G single-GPU setup with BF16/FP32)
+# Training parameters (optimized for 48G GPU with BF16/FP32)
 MAX_LENGTH=512
-BATCH_SIZE=12  # Reduced for BF16/FP32 memory usage
-GRADIENT_ACCUMULATION_STEPS=5  # Total effective batch size = 12 * 5 = 60
+
+# Adjust batch size based on GPU configuration
+if [ "$GPU_CONFIG" = "single" ]; then
+    BATCH_SIZE=12  # Larger batch size for single GPU (48G)
+    GRADIENT_ACCUMULATION_STEPS=5  # Total effective batch size = 12 * 5 = 60
+    echo "Single-GPU: batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=60"
+else
+    BATCH_SIZE=8   # Per device batch size for dual-GPU
+    GRADIENT_ACCUMULATION_STEPS=4  # Total effective batch size = 8 * 2 * 4 = 64
+    echo "Dual-GPU: batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=64"
+fi
+
 LEARNING_RATE=1e-4
 NUM_EPOCHS=3
 WARMUP_RATIO=0.1
@@ -92,6 +120,7 @@ python custom_training/train_mixlora_custom.py \
     --backbone "$BACKBONE" \
     --base_model "$BASE_MODEL" \
     --output_dir "$OUTPUT_DIR" \
+    --num_gpu $NUM_GPU \
     --num_experts $NUM_EXPERTS \
     --top_k $TOP_K \
     --routing_strategy "$ROUTING_STRATEGY" \
@@ -125,11 +154,13 @@ echo "Training completed!"
 
 echo ""
 echo "Usage examples:"
-echo "  ./run_custom_training.sh                    # Train with llama on culturalbench"
-echo "  ./run_custom_training.sh llama 2           # Train with llama on culturalbench"
-echo "  ./run_custom_training.sh qwen 2            # Train with qwen on culturalbench"
-echo "  ./run_custom_training.sh llama 3           # Train with llama on normad"
-echo "  ./run_custom_training.sh qwen 3            # Train with qwen on normad"
+echo "  ./run_custom_training.sh                    # Train with llama on culturalbench (dual-GPU)"
+echo "  ./run_custom_training.sh llama 2 2         # Train with llama on culturalbench (dual-GPU)"
+echo "  ./run_custom_training.sh llama 2 1         # Train with llama on culturalbench (single-GPU)"
+echo "  ./run_custom_training.sh qwen 2 2          # Train with qwen on culturalbench (dual-GPU)"
+echo "  ./run_custom_training.sh qwen 2 1          # Train with qwen on culturalbench (single-GPU)"
+echo "  ./run_custom_training.sh llama 3 2         # Train with llama on normad (dual-GPU)"
+echo "  ./run_custom_training.sh qwen 3 1          # Train with qwen on normad (single-GPU)"
 echo ""
 echo "Check the output directory for:"
 echo "- best_model/: Best model adapter weights"
