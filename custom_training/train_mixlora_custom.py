@@ -200,13 +200,22 @@ class CustomMixLoRATrainer:
 
         # Load base model for single GPU training with large batch size
         self.logger.info(f"Loading model for single GPU training on: {self.device}")
+
+        # Determine model dtype to avoid gradient scaling issues
+        if torch.cuda.is_bf16_supported():
+            model_dtype = torch.bfloat16
+            self.logger.info("Using bfloat16 for model weights")
+        else:
+            model_dtype = torch.float32
+            self.logger.info("Using float32 for model weights (bfloat16 not supported)")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.args.base_model,
-            torch_dtype=torch.float16,
+            torch_dtype=model_dtype,
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
-        self.model_dtype = torch.float16
+        self.model_dtype = model_dtype
 
         self.logger.info(f"Model loaded successfully with dtype: {self.model_dtype}")
 
@@ -304,15 +313,16 @@ class CustomMixLoRATrainer:
         # Get actual layer for dimension inspection and device detection
         sample_layer = self.model.model.layers[0]
 
-        # Determine the target device for weights
+        # Determine the target device and dtype for weights
         # Always use self.device (cuda:0) for consistency
         target_device = self.device
-        self.logger.info(f"Creating weights on device: {target_device}")
+        target_dtype = self.model_dtype
+        self.logger.info(f"Creating weights on device: {target_device} with dtype: {target_dtype}")
 
         for layer_idx in range(num_layers):
             # Router gate weights
             weights[f"mixlora.layers.{layer_idx}.mlp.moe_gate.weight"] = torch.randn(
-                self.args.num_experts, hidden_size, dtype=self.model_dtype, device=target_device
+                self.args.num_experts, hidden_size, dtype=target_dtype, device=target_device
             ) * self.args.router_init_range
 
             # Expert LoRA weights for each target module
@@ -356,12 +366,12 @@ class CustomMixLoRATrainer:
 
                         # LoRA A matrix
                         weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                            self.args.lora_r, in_features, dtype=self.model_dtype, device=target_device
+                            self.args.lora_r, in_features, dtype=target_dtype, device=target_device
                         ) * 0.01
 
                         # LoRA B matrix
                         weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                            out_features, self.args.lora_r, dtype=self.model_dtype, device=target_device
+                            out_features, self.args.lora_r, dtype=target_dtype, device=target_device
                         )
 
                 except Exception as e:
@@ -394,12 +404,12 @@ class CustomMixLoRATrainer:
 
                     # LoRA A matrix (in_features -> rank)
                     weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                        self.args.lora_r, in_features, dtype=self.model_dtype, device=target_device
+                        self.args.lora_r, in_features, dtype=target_dtype, device=target_device
                     ) * 0.01
 
                     # LoRA B matrix (rank -> out_features)
                     weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                        out_features, self.args.lora_r, dtype=self.model_dtype, device=target_device
+                        out_features, self.args.lora_r, dtype=target_dtype, device=target_device
                     )
 
                 except Exception as e:
@@ -624,10 +634,15 @@ class CustomMixLoRATrainer:
         bf16_available = torch.cuda.is_bf16_supported()
         self.logger.info(f"BF16 support: {bf16_available}")
 
-        # Use FP16 for memory efficiency
-        self.logger.info("Using FP16 precision for single GPU training")
-        use_fp16 = True
-        use_bf16 = False
+        # Use BF16 if available, otherwise FP32 to avoid gradient scaling issues
+        if bf16_available:
+            self.logger.info("Using BF16 precision for single GPU training")
+            use_fp16 = False
+            use_bf16 = True
+        else:
+            self.logger.info("Using FP32 precision for single GPU training (BF16 not available)")
+            use_fp16 = False
+            use_bf16 = False
 
         # Calculate effective batch size
         per_device_batch_size = self.args.batch_size
@@ -656,7 +671,7 @@ class CustomMixLoRATrainer:
             fp16=use_fp16,
             # Additional stability settings
             gradient_checkpointing=True,  # Enable to save memory
-            max_grad_norm=1.0,  # Gradient clipping
+            max_grad_norm=1.0,  # Gradient clipping (safe with BF16/FP32)
             # Memory optimization
             save_safetensors=True,  # Use safer tensor format
             optim="adamw_torch",  # Use PyTorch AdamW for better memory
