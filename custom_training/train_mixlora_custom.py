@@ -29,16 +29,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
-# NUCLEAR OPTION: Completely disable DataParallel
-# Replace DataParallel with Identity to prevent any usage
-original_DataParallel = torch.nn.DataParallel
-
-def DisabledDataParallel(module, *args, **kwargs):
-    print("[WARNING] DataParallel usage detected and blocked! Using single device instead.")
-    return module  # Just return the original module without wrapping
-
-# Monkey patch to disable DataParallel
-torch.nn.DataParallel = DisabledDataParallel
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -763,6 +753,8 @@ class CustomMixLoRATrainer:
             no_cuda=False if torch.cuda.is_available() else True,
             # Force single process for single GPU to avoid DataParallel
             local_rank=-1 if self.args.num_gpu == 1 else None,
+            # Additional safety: disable DDP for single GPU
+            ddp_backend=None if self.args.num_gpu == 1 else "nccl",
         )
 
         # Create trainer
@@ -859,6 +851,15 @@ def main():
     if num_gpu == 1:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         print(f"[EARLY SETUP] Forced CUDA_VISIBLE_DEVICES=0 for single GPU training")
+
+        # CRITICAL: Also disable any parallel training environment variables
+        os.environ.pop("LOCAL_RANK", None)
+        os.environ.pop("RANK", None)
+        os.environ.pop("WORLD_SIZE", None)
+        os.environ.pop("MASTER_ADDR", None)
+        os.environ.pop("MASTER_PORT", None)
+        print("[EARLY SETUP] Cleared all distributed training environment variables")
+
     elif num_gpu == 2:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
         print(f"[EARLY SETUP] Set CUDA_VISIBLE_DEVICES=0,1 for dual GPU training")
