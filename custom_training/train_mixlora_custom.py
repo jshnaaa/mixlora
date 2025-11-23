@@ -765,11 +765,6 @@ class CustomMixLoRATrainer:
             local_rank=-1 if self.args.num_gpu == 1 else None,
         )
 
-        # FINAL FIX: Force n_gpu=1 to completely disable DataParallel
-        if self.args.num_gpu == 1:
-            training_args.n_gpu = 1
-            training_args._n_gpu = 1  # Also set private attribute
-
         # Create trainer
         trainer = Trainer(
             model=self.model,
@@ -781,10 +776,14 @@ class CustomMixLoRATrainer:
             compute_metrics=self.compute_metrics,
         )
 
-        # Double check: manually set trainer's n_gpu if needed
+        # FINAL FIX: Force n_gpu using internal attribute for single GPU
         if self.args.num_gpu == 1:
-            trainer.args.n_gpu = 1
-            trainer.args._n_gpu = 1
+            # Use setattr to bypass property restrictions
+            object.__setattr__(trainer.args, '_n_gpu', 1)
+            # Also try to set it on the training_args object
+            if hasattr(training_args, '_n_gpu'):
+                object.__setattr__(training_args, '_n_gpu', 1)
+            self.logger.info("Forced n_gpu=1 to disable DataParallel for single GPU training")
 
         # Add best model tracker callback
         best_model_tracker = BestModelTracker(self)
