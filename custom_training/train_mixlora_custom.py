@@ -171,6 +171,12 @@ class CustomMixLoRATrainer:
 
     def _setup_gpu_configuration(self):
         """Setup GPU configuration based on num_gpu parameter."""
+        # Check if we're running under torchrun (distributed training)
+        if "LOCAL_RANK" in os.environ:
+            print(f"Detected torchrun environment: LOCAL_RANK={os.environ.get('LOCAL_RANK')}")
+            print("Using DistributedDataParallel (DDP) instead of DataParallel")
+            return
+
         if torch.cuda.is_available():
             available_gpus = torch.cuda.device_count()
 
@@ -178,23 +184,16 @@ class CustomMixLoRATrainer:
                 # FORCE single GPU training - override any existing setting
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
                 print(f"FORCE single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
-                print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
+                print("Note: Using extreme memory optimization for single GPU")
 
                 # Additional check: ensure torch sees only 1 GPU
                 torch.cuda.empty_cache()  # Clear cache
                 print(f"After setting CUDA_VISIBLE_DEVICES=0, torch sees {torch.cuda.device_count()} GPU(s)")
 
             elif self.args.num_gpu == 2:
-                # Dual GPU training
-                if available_gpus >= 2:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-                    print(f"Configured for dual-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
-                    print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
-                else:
-                    print(f"Warning: Requested {self.args.num_gpu} GPUs but only {available_gpus} available")
-                    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                    print(f"Falling back to single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
-                    self.args.num_gpu = 1  # Update the argument
+                # Dual GPU training - let torchrun handle it
+                print(f"Multi-GPU training will use torchrun with DistributedDataParallel")
+                print("Note: Using BF16/FP32 precision for multi-GPU training")
             else:
                 raise ValueError(f"Unsupported num_gpu: {self.args.num_gpu}. Supported values: 1, 2")
         else:
@@ -718,6 +717,32 @@ class CustomMixLoRATrainer:
         self.logger.info(f"Batch size per device: {per_device_batch_size}")
         self.logger.info(f"Total effective batch size: {total_batch_size} (Configured GPUs: {self.args.num_gpu}, Available: {gpu_count})")
 
+        # Extreme memory optimization for single GPU
+        if self.args.num_gpu == 1:
+            memory_optimization = {
+                "gradient_checkpointing": True,
+                "dataloader_pin_memory": False,
+                "max_grad_norm": 1.0,
+                "optim": "adamw_torch",
+                "save_safetensors": True,
+                "dataloader_num_workers": 0,
+                "remove_unused_columns": True,  # Remove unused columns to save memory
+                "prediction_loss_only": True,   # Only compute loss, not predictions
+                "skip_memory_metrics": True,    # Skip memory profiling
+                "eval_accumulation_steps": 1,   # Minimize eval memory usage
+            }
+            self.logger.info("Using extreme memory optimization for single GPU")
+        else:
+            memory_optimization = {
+                "gradient_checkpointing": True,
+                "dataloader_pin_memory": False,
+                "max_grad_norm": 1.0,
+                "optim": "adamw_torch",
+                "save_safetensors": True,
+                "dataloader_num_workers": 0,
+                "remove_unused_columns": False,  # Keep for evaluation
+            }
+
         # Setup training arguments
         training_args = TrainingArguments(
             output_dir=self.output_dir,
@@ -737,24 +762,16 @@ class CustomMixLoRATrainer:
             # Dynamic precision based on GPU setup
             bf16=use_bf16,
             fp16=use_fp16,
-            # Additional stability settings
-            gradient_checkpointing=True,  # Enable to save memory
-            max_grad_norm=1.0,  # Gradient clipping (safe with BF16/FP32)
-            # Memory optimization
-            save_safetensors=True,  # Use safer tensor format
-            optim="adamw_torch",  # Use PyTorch AdamW for better memory
-            dataloader_pin_memory=False,
-            remove_unused_columns=False,
+            # Memory optimization settings
+            **memory_optimization,
+            dataloader_drop_last=True,  # Ensure even batch distribution
             report_to=None,  # Disable wandb for now
             # GPU settings - force single device when num_gpu=1
-            dataloader_num_workers=0,  # Avoid multiprocessing issues
-            dataloader_drop_last=True,  # Ensure even batch distribution
-            # Critical fix: prevent DataParallel when using single GPU
             no_cuda=False if torch.cuda.is_available() else True,
             # Force single process for single GPU to avoid DataParallel
-            local_rank=-1 if self.args.num_gpu == 1 else None,
+            local_rank=-1 if self.args.num_gpu == 1 and "LOCAL_RANK" not in os.environ else None,
             # Additional safety: disable DDP for single GPU
-            ddp_backend=None if self.args.num_gpu == 1 else "nccl",
+            ddp_backend=None if self.args.num_gpu == 1 and "LOCAL_RANK" not in os.environ else "nccl",
         )
 
         # Create trainer

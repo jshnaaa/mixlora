@@ -77,9 +77,10 @@ MAX_LENGTH=512
 
 # Adjust batch size based on GPU configuration
 if [ "$GPU_CONFIG" = "single" ]; then
-    BATCH_SIZE=12  # Larger batch size for single GPU (48G)
-    GRADIENT_ACCUMULATION_STEPS=5  # Total effective batch size = 12 * 5 = 60
-    echo "Single-GPU: batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=60"
+    # Extreme memory optimization for single GPU
+    BATCH_SIZE=4   # Much smaller batch size to avoid OOM
+    GRADIENT_ACCUMULATION_STEPS=15  # Total effective batch size = 4 * 15 = 60
+    echo "Single-GPU (Memory Optimized): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=60"
 else
     BATCH_SIZE=8   # Per device batch size for dual-GPU
     GRADIENT_ACCUMULATION_STEPS=4  # Total effective batch size = 8 * 2 * 4 = 64
@@ -114,34 +115,66 @@ if [ ! -d "$BASE_MODEL" ]; then
     exit 1
 fi
 
-# Run training
-python custom_training/train_mixlora_custom.py \
-    --data_id $DATA_ID \
-    --backbone "$BACKBONE" \
-    --base_model "$BASE_MODEL" \
-    --output_dir "$OUTPUT_DIR" \
-    --num_gpu $NUM_GPU \
-    --num_experts $NUM_EXPERTS \
-    --top_k $TOP_K \
-    --routing_strategy "$ROUTING_STRATEGY" \
-    --router_aux_loss_coef $ROUTER_AUX_LOSS_COEF \
-    --router_init_range $ROUTER_INIT_RANGE \
-    --jitter_noise $JITTER_NOISE \
-    --lora_r $LORA_R \
-    --lora_alpha $LORA_ALPHA \
-    --lora_dropout $LORA_DROPOUT \
-    --max_length $MAX_LENGTH \
-    --batch_size $BATCH_SIZE \
-    --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
-    --learning_rate $LEARNING_RATE \
-    --num_epochs $NUM_EPOCHS \
-    --warmup_ratio $WARMUP_RATIO \
-    --weight_decay $WEIGHT_DECAY \
-    --eval_interval $EVAL_INTERVAL \
-    --save_steps $SAVE_STEPS \
-    --logging_steps $LOGGING_STEPS \
-    --wandb_project "$WANDB_PROJECT" \
-    --run_name "$RUN_NAME"
+# Run training with appropriate method based on GPU count
+if [ "$GPU_CONFIG" = "single" ]; then
+    echo "Running single-GPU training with memory optimizations..."
+    python custom_training/train_mixlora_custom.py \
+        --data_id $DATA_ID \
+        --backbone "$BACKBONE" \
+        --base_model "$BASE_MODEL" \
+        --output_dir "$OUTPUT_DIR" \
+        --num_gpu $NUM_GPU \
+        --num_experts $NUM_EXPERTS \
+        --top_k $TOP_K \
+        --routing_strategy "$ROUTING_STRATEGY" \
+        --router_aux_loss_coef $ROUTER_AUX_LOSS_COEF \
+        --router_init_range $ROUTER_INIT_RANGE \
+        --jitter_noise $JITTER_NOISE \
+        --lora_r $LORA_R \
+        --lora_alpha $LORA_ALPHA \
+        --lora_dropout $LORA_DROPOUT \
+        --max_length $MAX_LENGTH \
+        --batch_size $BATCH_SIZE \
+        --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
+        --learning_rate $LEARNING_RATE \
+        --num_epochs $NUM_EPOCHS \
+        --warmup_ratio $WARMUP_RATIO \
+        --weight_decay $WEIGHT_DECAY \
+        --eval_interval $EVAL_INTERVAL \
+        --save_steps $SAVE_STEPS \
+        --logging_steps $LOGGING_STEPS \
+        --wandb_project "$WANDB_PROJECT" \
+        --run_name "$RUN_NAME"
+else
+    echo "Running multi-GPU training with torchrun (DDP instead of DataParallel)..."
+    torchrun --nproc_per_node=2 --master_port=29500 custom_training/train_mixlora_custom.py \
+        --data_id $DATA_ID \
+        --backbone "$BACKBONE" \
+        --base_model "$BASE_MODEL" \
+        --output_dir "$OUTPUT_DIR" \
+        --num_gpu $NUM_GPU \
+        --num_experts $NUM_EXPERTS \
+        --top_k $TOP_K \
+        --routing_strategy "$ROUTING_STRATEGY" \
+        --router_aux_loss_coef $ROUTER_AUX_LOSS_COEF \
+        --router_init_range $ROUTER_INIT_RANGE \
+        --jitter_noise $JITTER_NOISE \
+        --lora_r $LORA_R \
+        --lora_alpha $LORA_ALPHA \
+        --lora_dropout $LORA_DROPOUT \
+        --max_length $MAX_LENGTH \
+        --batch_size $BATCH_SIZE \
+        --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
+        --learning_rate $LEARNING_RATE \
+        --num_epochs $NUM_EPOCHS \
+        --warmup_ratio $WARMUP_RATIO \
+        --weight_decay $WEIGHT_DECAY \
+        --eval_interval $EVAL_INTERVAL \
+        --save_steps $SAVE_STEPS \
+        --logging_steps $LOGGING_STEPS \
+        --wandb_project "$WANDB_PROJECT" \
+        --run_name "$RUN_NAME"
+fi
 
 echo "Training completed!"
 
