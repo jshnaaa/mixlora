@@ -450,19 +450,19 @@ class CustomMixLoRATrainer:
         # Update device reference for consistency
         self.device = model_device
 
-        # Auto-determine pretrained LoRA path for MixLoRA-only training if not specified
-        if self.args.train_mixlora_only and not self.args.pretrained_lora_path:
+        # Load pretrained LoRA weights if specified
+        if self.args.pretrained_lora_path:
+            self._load_pretrained_lora()
+        elif self.args.train_mixlora_only:
+            # Auto-determine pretrained LoRA path for MixLoRA-only training if not specified
             auto_lora_path = self._get_lora_weights_path()
             if auto_lora_path:
                 self.args.pretrained_lora_path = auto_lora_path
                 self.logger.info(f"Auto-determined LoRA weights path: {auto_lora_path}")
+                self._load_pretrained_lora()
             else:
                 self.logger.warning(f"Could not auto-determine LoRA weights path for data_id={self.args.data_id}, backbone={self.args.backbone}")
                 self.logger.warning("Proceeding with MixLoRA-only training without pretrained LoRA weights")
-
-        # Load pretrained LoRA weights if specified or auto-determined
-        if self.args.pretrained_lora_path:
-            self._load_pretrained_lora()
 
         # Freeze parameters if requested
         if self.args.freeze_base_model or self.args.train_mixlora_only:

@@ -2,17 +2,17 @@
 
 # Custom training script for MixLoRA on cultural datasets
 # Supports automatic dataset splitting, best model saving, and comprehensive evaluation
-# Usage: ./run_custom_training.sh [BACKBONE] [DATA_ID] [NUM_GPU] [PRETRAINED_LORA_PATH]
+# Usage: ./run_custom_training.sh [BACKBONE] [DATA_ID] [NUM_GPU] [TRAINING_MODE]
 # BACKBONE: llama (default) | qwen
 # DATA_ID: 2 (culturalbench, default) | 3 (normad) | 0 (unified_small) | 1 (unified) | 4 (cultureLLM)
 # NUM_GPU: 2 (dual-GPU, default) | 1 (single-GPU)
-# PRETRAINED_LORA_PATH: Path to pretrained LoRA model (optional, auto-detected if not provided for MixLoRA-only training)
+# TRAINING_MODE: full (default, full model training) | mixlora (MixLoRA-only with auto LoRA path detection)
 
 # Parse command line arguments
 BACKBONE=${1:-"llama"}  # Default to llama
 DATA_ID=${2:-2}         # Default to culturalbench
 NUM_GPU=${3:-2}         # Default to dual-GPU
-TRAINING_MODE=${4:-"full"}  # Default to full training
+TRAINING_MODE=${4:-"mixlora"}  # Default to full training
 
 # Model configuration based on backbone
 case $BACKBONE in
@@ -27,6 +27,53 @@ case $BACKBONE in
         exit 1
         ;;
 esac
+
+# Function to get LoRA weights path based on backbone and data_id
+get_lora_weights_path() {
+    local backbone=$1
+    local data_id=$2
+
+    case "${data_id}_${backbone}" in
+        # unified_all_datasets_small
+        "0_qwen")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_small_qwen_20251111_1530/best_lora"
+            ;;
+        "0_llama")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_small_llama_20251111_1530/best_lora"
+            ;;
+        # unified_all_datasets
+        "1_qwen")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_qwen_20251111_1530/best_lora"
+            ;;
+        "1_llama")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_llama_20251111_1530/best_lora"
+            ;;
+        # CulturalBench
+        "2_qwen")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_qwen_20251112_1228/best_lora"
+            ;;
+        "2_llama")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_llama_20251112_1141/best_lora"
+            ;;
+        # NormAD
+        "3_qwen")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_qwen_20251111_1204/best_lora"
+            ;;
+        "3_llama")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_llama_20251112_1335/best_lora"
+            ;;
+        # CultureLLM
+        "4_qwen")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_qwen_20251111_1530/best_lora"
+            ;;
+        "4_llama")
+            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_llama_20251111_1530/best_lora"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
 
 # Dataset configuration
 case $DATA_ID in
@@ -87,7 +134,7 @@ LORA_DROPOUT=0.05
 MAX_LENGTH=512
 
 # Adjust batch size based on GPU configuration and training mode
-if [ "$TRAINING_MODE" != "full" ]; then
+if [ "$TRAINING_MODE" = "mixlora" ]; then
     # MixLoRA-only training: Can use larger batch sizes due to frozen parameters
     if [ "$GPU_CONFIG" = "single" ]; then
         BATCH_SIZE=8   # Larger batch size for MixLoRA-only training
@@ -140,21 +187,28 @@ case $TRAINING_MODE in
         ;;
     "mixlora")
         echo "🔒 MixLoRA-only training mode with auto LoRA path detection"
-        echo "Will auto-detect LoRA weights based on backbone ($BACKBONE) and data_id ($DATA_ID)"
-        MIXLORA_ARGS="--train_mixlora_only"
+
+        # Get LoRA path based on backbone and data_id
+        PRETRAINED_LORA_PATH=$(get_lora_weights_path "$BACKBONE" "$DATA_ID")
+
+        if [ -n "$PRETRAINED_LORA_PATH" ]; then
+            echo "Using LoRA weights: $PRETRAINED_LORA_PATH"
+
+            if [ -e "$PRETRAINED_LORA_PATH" ]; then
+                MIXLORA_ARGS="--pretrained_lora_path \"$PRETRAINED_LORA_PATH\" --train_mixlora_only"
+            else
+                echo "Warning: LoRA path not found, will use auto-detection in Python"
+                MIXLORA_ARGS="--train_mixlora_only"
+            fi
+        else
+            echo "Error: No LoRA mapping found for backbone=$BACKBONE, data_id=$DATA_ID"
+            echo "Will use auto-detection in Python"
+            MIXLORA_ARGS="--train_mixlora_only"
+        fi
         ;;
     *)
-        # Treat as custom LoRA path
-        echo "🔒 MixLoRA-only training mode with custom LoRA path"
-        echo "Pretrained LoRA path: $TRAINING_MODE"
-
-        # Verify pretrained LoRA path exists
-        if [ ! -e "$TRAINING_MODE" ]; then
-            echo "Error: Pretrained LoRA path not found: $TRAINING_MODE"
-            exit 1
-        fi
-
-        MIXLORA_ARGS="--pretrained_lora_path \"$TRAINING_MODE\" --train_mixlora_only"
+        echo "Error: Unsupported training mode '$TRAINING_MODE'. Supported values: full, mixlora"
+        exit 1
         ;;
 esac
 
@@ -249,14 +303,22 @@ echo "  ./run_custom_training.sh llama 2 2 mixlora      # MixLoRA-only with auto
 echo "  ./run_custom_training.sh llama 2 1 mixlora      # MixLoRA-only with auto LoRA path (single-GPU)"
 echo "  ./run_custom_training.sh qwen 3 2 mixlora       # MixLoRA-only with qwen on normad (dual-GPU)"
 echo ""
-echo "  # MixLoRA-only training with custom LoRA path:"
-echo "  ./run_custom_training.sh llama 2 2 /path/to/pretrained_lora  # MixLoRA-only with custom path"
-echo ""
 echo "  # Other dataset examples:"
-echo "  ./run_custom_training.sh qwen 2 2 full          # Train with qwen on culturalbench (dual-GPU)"
-echo "  ./run_custom_training.sh llama 3 2 full         # Train with llama on normad (dual-GPU)"
+echo "  ./run_custom_training.sh qwen 2 2 full          # Train with qwen on culturalbench (dual-GPU, full mode)"
+echo "  ./run_custom_training.sh llama 3 2 full         # Train with llama on normad (dual-GPU, full mode)"
 echo "  ./run_custom_training.sh llama 0 1 mixlora      # Train with llama on unified_small (single-GPU, MixLoRA-only)"
 echo "  ./run_custom_training.sh qwen 4 2 mixlora       # Train with qwen on cultureLLM (dual-GPU, MixLoRA-only)"
+echo ""
+echo "  # Available datasets (DATA_ID):"
+echo "  #   0: unified_all_datasets_small"
+echo "  #   1: unified_all_datasets"
+echo "  #   2: CulturalBench (default)"
+echo "  #   3: NormAD"
+echo "  #   4: CultureLLM"
+echo ""
+echo "  # Training modes:"
+echo "  #   full: Complete model training (default)"
+echo "  #   mixlora: MixLoRA-only training with auto LoRA path detection (memory efficient)"
 echo ""
 echo "Check the output directory for:"
 echo "- best_model/: Best model adapter weights"
