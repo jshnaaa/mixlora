@@ -164,6 +164,9 @@ class ChoiceQuestionCollator:
         # Find max length in batch
         max_length = max(len(ids) for ids in input_ids)
 
+        # Ensure minimum length to avoid 0-dimensional tensors
+        max_length = max(max_length, 1)
+
         # Pad to multiple if specified
         if self.pad_to_multiple_of > 0:
             max_length = ((max_length + self.pad_to_multiple_of - 1)
@@ -175,26 +178,53 @@ class ChoiceQuestionCollator:
         padded_labels = []
 
         for i in range(len(features)):
+            # Ensure input_ids has at least 1 element
+            current_input_ids = input_ids[i]
+            if len(current_input_ids) == 0:
+                # If somehow we get empty input_ids, add pad token
+                current_input_ids = torch.tensor([self.tokenizer.pad_token_id], dtype=torch.long)
+
             # Pad input_ids
-            pad_length = max_length - len(input_ids[i])
-            padded_ids = torch.cat([
-                input_ids[i],
-                torch.full((pad_length,), self.tokenizer.pad_token_id, dtype=input_ids[i].dtype)
-            ])
+            pad_length = max_length - len(current_input_ids)
+            if pad_length > 0:
+                padded_ids = torch.cat([
+                    current_input_ids,
+                    torch.full((pad_length,), self.tokenizer.pad_token_id, dtype=current_input_ids.dtype)
+                ])
+            else:
+                padded_ids = current_input_ids
             padded_input_ids.append(padded_ids)
 
+            # Ensure attention_mask matches
+            current_attention_mask = attention_masks[i]
+            if len(current_attention_mask) != len(input_ids[i]):
+                # Fix attention mask length if mismatched
+                current_attention_mask = torch.ones(len(input_ids[i]), dtype=torch.long)
+
             # Pad attention_mask
-            padded_mask = torch.cat([
-                attention_masks[i],
-                torch.zeros(pad_length, dtype=attention_masks[i].dtype)
-            ])
+            if pad_length > 0:
+                padded_mask = torch.cat([
+                    current_attention_mask,
+                    torch.zeros(pad_length, dtype=current_attention_mask.dtype)
+                ])
+            else:
+                padded_mask = current_attention_mask
             padded_attention_masks.append(padded_mask)
 
+            # Ensure labels matches
+            current_labels = labels[i]
+            if len(current_labels) != len(input_ids[i]):
+                # Fix labels length if mismatched
+                current_labels = torch.full((len(input_ids[i]),), -100, dtype=torch.long)
+
             # Pad labels
-            padded_label = torch.cat([
-                labels[i],
-                torch.full((pad_length,), -100, dtype=labels[i].dtype)
-            ])
+            if pad_length > 0:
+                padded_label = torch.cat([
+                    current_labels,
+                    torch.full((pad_length,), -100, dtype=current_labels.dtype)
+                ])
+            else:
+                padded_label = current_labels
             padded_labels.append(padded_label)
 
         return {

@@ -530,27 +530,6 @@ class CustomMixLoRATrainer:
         # Setup data collator
         self.data_collator = ChoiceQuestionCollator(tokenizer=self.tokenizer)
 
-        # Create a safe collator that removes non-tensor data for DataParallel compatibility
-        self.safe_collator = self._create_safe_collator()
-
-    def _create_safe_collator(self):
-        """Create a collator that only returns tensor data safe for DataParallel."""
-        original_collator = self.data_collator
-
-        def safe_collator(features):
-            # Process with original collator
-            batch = original_collator(features)
-
-            # Only return tensor data - remove choice_answers which causes DataParallel issues
-            safe_batch = {
-                'input_ids': batch['input_ids'],
-                'attention_mask': batch['attention_mask'],
-                'labels': batch['labels']
-            }
-
-            return safe_batch
-
-        return safe_collator
 
     def save_adapter_weights(self, save_path: str):
         """Save only the adapter weights (not the full model)."""
@@ -760,9 +739,13 @@ class CustomMixLoRATrainer:
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             report_to=None,  # Disable wandb for now
-            # Multi-GPU settings
+            # GPU settings - force single device when num_gpu=1
             dataloader_num_workers=0,  # Avoid multiprocessing issues
             dataloader_drop_last=True,  # Ensure even batch distribution
+            # Critical fix: prevent DataParallel when using single GPU
+            no_cuda=False if torch.cuda.is_available() else True,
+            # Force single process for single GPU to avoid DataParallel
+            local_rank=-1 if self.args.num_gpu == 1 else None,
         )
 
         # Create trainer
@@ -771,7 +754,7 @@ class CustomMixLoRATrainer:
             args=training_args,
             train_dataset=self.train_dataset,
             eval_dataset=self.val_dataset,
-            data_collator=self.safe_collator,  # Use safe collator (tensor-only)
+            data_collator=self.data_collator,
             tokenizer=self.tokenizer,
             compute_metrics=self.compute_metrics,
         )
