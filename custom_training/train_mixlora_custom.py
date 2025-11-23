@@ -234,6 +234,9 @@ class CustomMixLoRATrainer:
         hidden_size = self.model.config.hidden_size
         num_layers = self.model.config.num_hidden_layers
 
+        # Get actual layer for dimension inspection
+        sample_layer = self.model.model.layers[0]
+
         for layer_idx in range(num_layers):
             # Router gate weights
             weights[f"mixlora.layers.{layer_idx}.mlp.moe_gate.weight"] = torch.randn(
@@ -286,20 +289,40 @@ class CustomMixLoRATrainer:
 
             # Attention LoRA weights
             for module_name, is_target in self.mixlora_config.target_modules_.items():
-                if not is_target or module_name in ["gate_proj", "up_proj", "down_proj", "fc1", "fc2"]:
+                if not is_target or module_name in ["gate_proj", "up_proj", "down_proj", "fc1", "fc2", "gate_up_proj"]:
                     continue
 
                 prefix = f"mixlora.layers.{layer_idx}.self_attn.{module_name}"
 
-                # LoRA A matrix
-                weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                    self.args.lora_r, hidden_size, dtype=torch.float16
-                ) * 0.01
+                # Get actual dimensions for attention modules
+                try:
+                    if module_name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+                        in_features = hidden_size
+                        out_features = hidden_size
+                    elif module_name == "qkv_proj":  # For Phi3
+                        in_features = hidden_size
+                        out_features = hidden_size * 3  # q, k, v combined
+                    elif module_name == "dense":  # For some Phi models
+                        in_features = hidden_size
+                        out_features = hidden_size
+                    else:
+                        # Default to hidden_size for unknown modules
+                        in_features = hidden_size
+                        out_features = hidden_size
 
-                # LoRA B matrix
-                weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                    hidden_size, self.args.lora_r, dtype=torch.float16
-                )
+                    # LoRA A matrix (in_features -> rank)
+                    weights[f"{prefix}.lora_A.weight"] = torch.randn(
+                        self.args.lora_r, in_features, dtype=torch.float16
+                    ) * 0.01
+
+                    # LoRA B matrix (rank -> out_features)
+                    weights[f"{prefix}.lora_B.weight"] = torch.zeros(
+                        out_features, self.args.lora_r, dtype=torch.float16
+                    )
+
+                except Exception as e:
+                    self.logger.warning(f"Could not determine dimensions for attention module {module_name}: {e}")
+                    continue
 
         return weights
 
