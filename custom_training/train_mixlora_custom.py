@@ -321,25 +321,28 @@ class CustomMixLoRATrainer:
         # Inject MixLoRA adapters
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
-        # Ensure model and all adapters are properly placed on primary GPU
-        # The Trainer will handle multi-GPU distribution automatically
-        self.model = self.model.to(self.device)
+        # For multi-GPU training, let Trainer handle device placement automatically
+        # Only move to device if single GPU training
+        if self.args.num_gpu == 1:
+            self.model = self.model.to(self.device)
 
-        # Also ensure all MixLoRA components are on the primary device
-        for layer in self.model.model.layers:
-            if hasattr(layer.mlp, 'mixlora_moes'):
-                for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
-                    moe_layer.to(self.device)
-                    if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
-                        moe_layer.gate_ = moe_layer.gate_.to(self.device)
-                    for expert_name, expert in moe_layer.experts_.items():
-                        expert.to(self.device)
+            # Also ensure all MixLoRA components are on the correct device for single GPU
+            for layer in self.model.model.layers:
+                if hasattr(layer.mlp, 'mixlora_moes'):
+                    for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
+                        moe_layer.to(self.device)
+                        if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
+                            moe_layer.gate_ = moe_layer.gate_.to(self.device)
+                        for expert_name, expert in moe_layer.experts_.items():
+                            expert.to(self.device)
 
-            if hasattr(layer.self_attn, 'mixlora_loras'):
-                for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
-                    lora_layer.to(self.device)
-
-        # Note: Do NOT manually wrap with DataParallel - let Trainer handle it
+                if hasattr(layer.self_attn, 'mixlora_loras'):
+                    for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
+                        lora_layer.to(self.device)
+        else:
+            # For multi-GPU training, keep model on CPU initially
+            # Trainer will handle device placement and parallelization
+            self.logger.info("Multi-GPU training: letting Trainer handle device placement")
 
         # Verify all components are on the correct device
         self._verify_device_consistency()
@@ -357,8 +360,11 @@ class CustomMixLoRATrainer:
         sample_layer = self.model.model.layers[0]
 
         # Determine the target device and dtype for weights
-        # Always use self.device (cuda:0) for consistency
-        target_device = self.device
+        # For multi-GPU training, use CPU; for single GPU, use self.device
+        if self.args.num_gpu > 1:
+            target_device = torch.device("cpu")
+        else:
+            target_device = self.device
         target_dtype = self.model_dtype
         self.logger.info(f"Creating weights on device: {target_device} with dtype: {target_dtype}")
 
@@ -463,6 +469,10 @@ class CustomMixLoRATrainer:
 
     def _verify_device_consistency(self):
         """Verify that all model components are on the correct device."""
+        if self.args.num_gpu > 1:
+            self.logger.info("Multi-GPU training: skipping device consistency check (Trainer will handle device placement)")
+            return
+
         target_device = self.device
 
         # Check main model parameters
@@ -753,12 +763,9 @@ class CustomMixLoRATrainer:
             # Multi-GPU settings
             dataloader_num_workers=0,  # Avoid multiprocessing issues
             dataloader_drop_last=True,  # Ensure even batch distribution
-            # DDP settings for dual-GPU training
-            ddp_find_unused_parameters=False,  # Set to False for better performance
-            ddp_timeout=1800,  # 30 minutes timeout for large models
         )
 
-        # Create trainer - use safe collator for DataParallel compatibility
+        # Create trainer
         trainer = Trainer(
             model=self.model,
             args=training_args,
@@ -777,8 +784,12 @@ class CustomMixLoRATrainer:
         self.trainer = trainer
 
         # Final device verification before training
-        self.logger.info(f"Final device check - Model device: {next(self.model.parameters()).device}")
-        self.logger.info(f"Training device: {self.device}")
+        if self.args.num_gpu == 1:
+            self.logger.info(f"Single GPU - Model device: {next(self.model.parameters()).device}")
+            self.logger.info(f"Training device: {self.device}")
+        else:
+            self.logger.info(f"Multi-GPU training - Model initial device: {next(self.model.parameters()).device}")
+            self.logger.info(f"Trainer will handle device distribution across {self.args.num_gpu} GPUs")
 
         # Train
         trainer.train()
