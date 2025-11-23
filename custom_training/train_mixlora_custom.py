@@ -452,6 +452,7 @@ class CustomMixLoRATrainer:
 
         # Load pretrained LoRA weights if specified
         if self.args.pretrained_lora_path:
+            self.logger.info(f"Pretrained LoRA path provided: {self.args.pretrained_lora_path}")
             self._load_pretrained_lora()
         elif self.args.train_mixlora_only:
             # Auto-determine pretrained LoRA path for MixLoRA-only training if not specified
