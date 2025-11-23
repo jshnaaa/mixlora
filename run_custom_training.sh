@@ -6,13 +6,13 @@
 # BACKBONE: llama (default) | qwen
 # DATA_ID: 2 (culturalbench, default) | 3 (normad) | 0 (unified_small) | 1 (unified) | 4 (cultureLLM)
 # NUM_GPU: 2 (dual-GPU, default) | 1 (single-GPU)
-# TRAINING_MODE: full (default, full model training) | mixlora (MixLoRA-only with auto LoRA path detection)
+# TRAINING_MODE: full (full model training) | mixlora (default, MixLoRA-only with auto LoRA path detection)
 
 # Parse command line arguments
 BACKBONE=${1:-"llama"}  # Default to llama
 DATA_ID=${2:-2}         # Default to culturalbench
 NUM_GPU=${3:-2}         # Default to dual-GPU
-TRAINING_MODE=${4:-"mixlora"}  # Default to full training
+TRAINING_MODE=${4:-"mixlora"}  # Default to mixlora training
 
 # Model configuration based on backbone
 case $BACKBONE in
