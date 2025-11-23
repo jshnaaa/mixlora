@@ -257,11 +257,19 @@ class CustomMixLoRATrainer:
             # Single GPU setup
             self.logger.info(f"Loading model for single GPU training on: {self.device}")
 
+        # Determine target device for model loading
+        if "LOCAL_RANK" in os.environ:
+            local_rank = int(os.environ["LOCAL_RANK"])
+            target_device = f"cuda:{local_rank}"
+        else:
+            target_device = self.device
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.args.base_model,
             torch_dtype=model_dtype,
             trust_remote_code=True,
-            low_cpu_mem_usage=True
+            low_cpu_mem_usage=True,
+            device_map={"": target_device}  # Force model to load on specific device
         )
 
         self.model_dtype = model_dtype
@@ -327,28 +335,38 @@ class CustomMixLoRATrainer:
         # Inject MixLoRA adapters
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
-        # Always move model to primary device initially
-        # For DDP, the model will be replicated to all devices later
-        self.model = self.model.to(self.device)
+        # CRITICAL: Ensure ALL components use the SAME device as the model
+        # Get the actual device where the model is loaded
+        model_device = next(self.model.parameters()).device
+        self.logger.info(f"Model is on device: {model_device}")
 
-        # Ensure all MixLoRA components are on the primary device
-        for layer in self.model.model.layers:
+        # Ensure all MixLoRA components are on the EXACT SAME device as the model
+        components_moved = 0
+        for layer_idx, layer in enumerate(self.model.model.layers):
             if hasattr(layer.mlp, 'mixlora_moes'):
                 for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
-                    moe_layer.to(self.device)
+                    # Move MoE layer to model device
+                    moe_layer.to(model_device)
+                    components_moved += 1
+
+                    # Move gate weights to model device
                     if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
-                        moe_layer.gate_ = moe_layer.gate_.to(self.device)
+                        moe_layer.gate_ = moe_layer.gate_.to(model_device)
+
+                    # Move all experts to model device
                     for expert_name, expert in moe_layer.experts_.items():
-                        expert.to(self.device)
+                        expert.to(model_device)
+                        components_moved += 1
 
             if hasattr(layer.self_attn, 'mixlora_loras'):
                 for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
-                    lora_layer.to(self.device)
+                    lora_layer.to(model_device)
+                    components_moved += 1
 
-        if self.args.num_gpu == 1:
-            self.logger.info(f"Single GPU: Model placed on {self.device}")
-        else:
-            self.logger.info(f"Multi-GPU: Model initially on {self.device}, DDP will replicate to all GPUs")
+        self.logger.info(f"Moved {components_moved} MixLoRA components to device: {model_device}")
+
+        # Update device reference for consistency
+        self.device = model_device
 
         # Verify all components are on the correct device
         self._verify_device_consistency()
@@ -366,10 +384,11 @@ class CustomMixLoRATrainer:
         sample_layer = self.model.model.layers[0]
 
         # Determine the target device and dtype for weights
-        # Always use primary device for initial weight creation
-        target_device = self.device
+        # CRITICAL: Use the SAME device as the model to ensure consistency
+        target_device = next(self.model.parameters()).device
         target_dtype = self.model_dtype
         self.logger.info(f"Creating weights on device: {target_device} with dtype: {target_dtype}")
+        self.logger.info(f"Model is on device: {target_device}")
 
         for layer_idx in range(num_layers):
             # Router gate weights
@@ -471,37 +490,56 @@ class CustomMixLoRATrainer:
         return weights
 
     def _verify_device_consistency(self):
-        """Verify that all model components are on the correct device."""
-        target_device = self.device
+        """Verify that ALL model components are on the SAME device."""
+        # Get the reference device from the model
+        model_device = next(self.model.parameters()).device
+        self.logger.info(f"Reference device from model: {model_device}")
 
-        # For multi-GPU training, just verify that components are on a CUDA device
-        if self.args.num_gpu > 1 and "LOCAL_RANK" in os.environ:
-            self.logger.info("Multi-GPU DDP training: checking that all components are on CUDA devices")
-            device_check = lambda d: d.type == 'cuda'
-            device_name = "CUDA"
-        else:
-            self.logger.info(f"Single GPU training: checking device consistency for {target_device}")
-            device_check = lambda d: d == target_device
-            device_name = str(target_device)
+        # Check ALL model parameters
+        inconsistent_params = []
+        for name, param in self.model.named_parameters():
+            if param.device != model_device:
+                inconsistent_params.append(f"{name}: {param.device}")
 
-        # Check main model parameters (sample check)
-        param_devices = set()
-        for name, param in list(self.model.named_parameters())[:5]:  # Sample first 5 params
-            param_devices.add(param.device)
-            if not device_check(param.device):
-                self.logger.warning(f"Parameter {name} on device {param.device}, expected {device_name}")
+        if inconsistent_params:
+            self.logger.error(f"DEVICE INCONSISTENCY DETECTED!")
+            for param_info in inconsistent_params[:10]:  # Show first 10
+                self.logger.error(f"  {param_info}")
+            if len(inconsistent_params) > 10:
+                self.logger.error(f"  ... and {len(inconsistent_params) - 10} more")
+            raise RuntimeError(f"Found {len(inconsistent_params)} parameters on wrong devices!")
 
-        # Check MixLoRA components specifically (sample check)
-        for layer_idx in range(min(2, len(self.model.model.layers))):  # Check first 2 layers
-            layer = self.model.model.layers[layer_idx]
+        # Check MixLoRA components specifically
+        mixlora_issues = []
+        for layer_idx, layer in enumerate(self.model.model.layers):
             if hasattr(layer.mlp, 'mixlora_moes'):
                 for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
                     # Check gate weights
                     if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
-                        if not device_check(moe_layer.gate_.device):
-                            self.logger.warning(f"Layer {layer_idx} MoE gate on device {moe_layer.gate_.device}, expected {device_name}")
+                        if moe_layer.gate_.device != model_device:
+                            mixlora_issues.append(f"Layer {layer_idx} MoE gate: {moe_layer.gate_.device}")
 
-        self.logger.info(f"Device consistency check completed. Found devices: {param_devices}")
+                    # Check expert weights
+                    for expert_name, expert in moe_layer.experts_.items():
+                        for param_name, param in expert.named_parameters():
+                            if param.device != model_device:
+                                mixlora_issues.append(f"Layer {layer_idx} expert {expert_name}.{param_name}: {param.device}")
+
+            if hasattr(layer.self_attn, 'mixlora_loras'):
+                for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
+                    for param_name, param in lora_layer.named_parameters():
+                        if param.device != model_device:
+                            mixlora_issues.append(f"Layer {layer_idx} LoRA {lora_name}.{param_name}: {param.device}")
+
+        if mixlora_issues:
+            self.logger.error(f"MIXLORA DEVICE INCONSISTENCY DETECTED!")
+            for issue in mixlora_issues[:10]:  # Show first 10
+                self.logger.error(f"  {issue}")
+            if len(mixlora_issues) > 10:
+                self.logger.error(f"  ... and {len(mixlora_issues) - 10} more")
+            raise RuntimeError(f"Found {len(mixlora_issues)} MixLoRA components on wrong devices!")
+
+        self.logger.info(f"✓ Device consistency check PASSED. All components on {model_device}")
 
     def setup_datasets(self):
         """Setup training, validation, and test datasets with 8:1:1 split."""
@@ -801,13 +839,39 @@ class CustomMixLoRATrainer:
         # Store reference for saving adapter weights
         self.trainer = trainer
 
-        # Final device verification before training
-        if self.args.num_gpu == 1:
-            self.logger.info(f"Single GPU - Model device: {next(self.model.parameters()).device}")
-            self.logger.info(f"Training device: {self.device}")
+        # FINAL CRITICAL DEVICE VERIFICATION BEFORE TRAINING
+        model_device = next(self.model.parameters()).device
+        self.logger.info(f"🔍 FINAL DEVICE CHECK - Model device: {model_device}")
+
+        # Count parameters on each device
+        device_counts = {}
+        for name, param in self.model.named_parameters():
+            device = param.device
+            if device not in device_counts:
+                device_counts[device] = 0
+            device_counts[device] += 1
+
+        self.logger.info(f"📊 Parameter distribution: {device_counts}")
+
+        # Verify single device
+        if len(device_counts) > 1:
+            self.logger.error(f"❌ CRITICAL ERROR: Model parameters on multiple devices!")
+            for device, count in device_counts.items():
+                self.logger.error(f"   {device}: {count} parameters")
+            raise RuntimeError("Model parameters are not on the same device!")
+
+        # DDP-specific checks
+        if "LOCAL_RANK" in os.environ:
+            local_rank = int(os.environ["LOCAL_RANK"])
+            expected_device = f"cuda:{local_rank}"
+            self.logger.info(f"🚀 DDP Rank {local_rank} - Expected device: {expected_device}")
+            if str(model_device) != expected_device:
+                self.logger.error(f"❌ DEVICE MISMATCH! Model on {model_device}, expected {expected_device}")
+                raise RuntimeError(f"DDP device mismatch: {model_device} != {expected_device}")
         else:
-            self.logger.info(f"Multi-GPU training - Model initial device: {next(self.model.parameters()).device}")
-            self.logger.info(f"Trainer will handle device distribution across {self.args.num_gpu} GPUs")
+            self.logger.info(f"🎯 Single GPU - All parameters on {model_device}")
+
+        self.logger.info(f"✅ FINAL DEVICE CHECK PASSED - Ready for training!")
 
         # Train
         trainer.train()
