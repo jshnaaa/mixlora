@@ -69,7 +69,7 @@ if [ ! -d "$BASE_MODEL" ]; then
 fi
 
 # Run training
-python train_mixlora_custom.py \
+python custom_training/train_mixlora_custom.py \
     --data_id $DATA_ID \
     --backbone "$BACKBONE" \
     --base_model "$BASE_MODEL" \

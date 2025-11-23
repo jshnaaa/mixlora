@@ -185,7 +185,7 @@ echo "Base model: $BASE_MODEL"
 echo "Adapter path: $ADAPTER_PATH"
 
 # Build command
-CMD="python inference_custom.py \
+CMD="python custom_training/inference_custom.py \
     --base_model_path \"$BASE_MODEL\" \
     --adapter_path \"$ADAPTER_PATH\" \
     --batch_size $BATCH_SIZE \
