@@ -264,13 +264,27 @@ class CustomMixLoRATrainer:
         else:
             target_device = self.device
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.args.base_model,
-            torch_dtype=model_dtype,
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-            device_map={"": target_device}  # Force model to load on specific device
-        )
+        # Additional memory optimizations for model loading
+        if self.args.num_gpu > 1:
+            # For dual GPU, use more aggressive memory settings
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.args.base_model,
+                torch_dtype=model_dtype,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                device_map={"": target_device},  # Force model to load on specific device
+                max_memory={target_device: "40GiB"},  # Limit memory usage per device
+                offload_folder=None,  # Disable offloading
+            )
+        else:
+            # Single GPU loading
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.args.base_model,
+                torch_dtype=model_dtype,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                device_map={"": target_device}  # Force model to load on specific device
+            )
 
         self.model_dtype = model_dtype
 
@@ -755,7 +769,7 @@ class CustomMixLoRATrainer:
         self.logger.info(f"Batch size per device: {per_device_batch_size}")
         self.logger.info(f"Total effective batch size: {total_batch_size} (Configured GPUs: {self.args.num_gpu}, Available: {gpu_count})")
 
-        # Extreme memory optimization for single GPU
+        # Memory optimization based on GPU configuration
         if self.args.num_gpu == 1:
             memory_optimization = {
                 "gradient_checkpointing": True,
@@ -771,6 +785,7 @@ class CustomMixLoRATrainer:
             }
             self.logger.info("Using extreme memory optimization for single GPU")
         else:
+            # AGGRESSIVE memory optimization for dual GPU (47GB each)
             memory_optimization = {
                 "gradient_checkpointing": True,
                 "dataloader_pin_memory": False,
@@ -779,7 +794,15 @@ class CustomMixLoRATrainer:
                 "save_safetensors": True,
                 "dataloader_num_workers": 0,
                 "remove_unused_columns": False,  # Keep for evaluation
+                "prediction_loss_only": True,   # Only compute loss, not predictions
+                "skip_memory_metrics": True,    # Skip memory profiling
+                "eval_accumulation_steps": 1,   # Minimize eval memory usage
+                "dataloader_drop_last": True,  # Ensure even batch distribution
+                # Additional DDP memory optimizations
+                "ddp_bucket_cap_mb": 25,        # Smaller DDP buckets to reduce memory
+                "ddp_broadcast_buffers": False, # Disable buffer broadcasting
             }
+            self.logger.info("Using aggressive memory optimization for dual GPU")
 
         # Setup training arguments
         training_args = TrainingArguments(
@@ -802,7 +825,6 @@ class CustomMixLoRATrainer:
             fp16=use_fp16,
             # Memory optimization settings
             **memory_optimization,
-            dataloader_drop_last=True,  # Ensure even batch distribution
             report_to=None,  # Disable wandb for now
             # GPU settings - force single device when num_gpu=1
             no_cuda=False if torch.cuda.is_available() else True,
@@ -872,6 +894,22 @@ class CustomMixLoRATrainer:
             self.logger.info(f"🎯 Single GPU - All parameters on {model_device}")
 
         self.logger.info(f"✅ FINAL DEVICE CHECK PASSED - Ready for training!")
+
+        # Final memory cleanup before training
+        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                with torch.cuda.device(i):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
+        # Log memory usage before training
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                allocated = torch.cuda.memory_allocated(i) / 1024**3  # GB
+                cached = torch.cuda.memory_reserved(i) / 1024**3     # GB
+                total = torch.cuda.get_device_properties(i).total_memory / 1024**3  # GB
+                self.logger.info(f"GPU {i} Memory - Allocated: {allocated:.2f}GB, Cached: {cached:.2f}GB, Total: {total:.2f}GB")
 
         # Train
         trainer.train()

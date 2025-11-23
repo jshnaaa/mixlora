@@ -82,9 +82,10 @@ if [ "$GPU_CONFIG" = "single" ]; then
     GRADIENT_ACCUMULATION_STEPS=15  # Total effective batch size = 4 * 15 = 60
     echo "Single-GPU (Memory Optimized): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=60"
 else
-    BATCH_SIZE=8   # Per device batch size for dual-GPU
-    GRADIENT_ACCUMULATION_STEPS=4  # Total effective batch size = 8 * 2 * 4 = 64
-    echo "Dual-GPU: batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=64"
+    # AGGRESSIVE memory optimization for dual-GPU (47GB each)
+    BATCH_SIZE=2   # Very small per device batch size to avoid OOM
+    GRADIENT_ACCUMULATION_STEPS=16  # Total effective batch size = 2 * 2 * 16 = 64
+    echo "Dual-GPU (Memory Optimized): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=64"
 fi
 
 LEARNING_RATE=1e-4
