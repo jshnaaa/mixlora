@@ -593,25 +593,53 @@ class CustomMixLoRATrainer:
         """Load pretrained LoRA weights into the model."""
         self.logger.info(f"Loading pretrained LoRA weights from: {self.args.pretrained_lora_path}")
 
+        # Add detailed path debugging
+        self.logger.info(f"Path exists check: {os.path.exists(self.args.pretrained_lora_path)}")
+        self.logger.info(f"Is file check: {os.path.isfile(self.args.pretrained_lora_path)}")
+        self.logger.info(f"Is directory check: {os.path.isdir(self.args.pretrained_lora_path)}")
+        self.logger.info(f"Is symlink check: {os.path.islink(self.args.pretrained_lora_path)}")
+
+        # Check if path exists at all
+        if not os.path.exists(self.args.pretrained_lora_path):
+            raise FileNotFoundError(f"Pretrained LoRA path does not exist: {self.args.pretrained_lora_path}")
+
         try:
             # Try to load as a complete model state dict
             if os.path.isfile(self.args.pretrained_lora_path):
+                self.logger.info("Loading as file...")
                 pretrained_weights = torch.load(self.args.pretrained_lora_path, map_location=self.device)
             elif os.path.isdir(self.args.pretrained_lora_path):
+                self.logger.info("Loading as directory...")
                 # Try to load from directory (adapter_model.bin or pytorch_model.bin)
-                possible_files = ["adapter_model.bin", "pytorch_model.bin", "model.bin"]
+                possible_files = ["adapter_model.bin", "pytorch_model.bin", "model.bin", "adapter_model.safetensors"]
                 pretrained_weights = None
+
+                # List directory contents for debugging
+                try:
+                    dir_contents = os.listdir(self.args.pretrained_lora_path)
+                    self.logger.info(f"Directory contents: {dir_contents}")
+                except Exception as e:
+                    self.logger.error(f"Cannot list directory contents: {e}")
+
                 for file_name in possible_files:
                     file_path = os.path.join(self.args.pretrained_lora_path, file_name)
+                    self.logger.info(f"Checking for file: {file_path}")
                     if os.path.exists(file_path):
-                        pretrained_weights = torch.load(file_path, map_location=self.device)
-                        self.logger.info(f"Loaded weights from: {file_path}")
-                        break
+                        self.logger.info(f"Found weight file: {file_path}")
+                        try:
+                            pretrained_weights = torch.load(file_path, map_location=self.device)
+                            self.logger.info(f"Successfully loaded weights from: {file_path}")
+                            break
+                        except Exception as e:
+                            self.logger.warning(f"Failed to load {file_path}: {e}")
+                            continue
 
                 if pretrained_weights is None:
-                    raise FileNotFoundError(f"No valid weight file found in {self.args.pretrained_lora_path}")
+                    raise FileNotFoundError(f"No valid weight file found in {self.args.pretrained_lora_path}. Checked: {possible_files}")
             else:
-                raise FileNotFoundError(f"Pretrained LoRA path not found: {self.args.pretrained_lora_path}")
+                # Path exists but is neither file nor directory - might be a special file
+                self.logger.warning(f"Path exists but is neither file nor directory: {self.args.pretrained_lora_path}")
+                raise FileNotFoundError(f"Pretrained LoRA path is not a file or directory: {self.args.pretrained_lora_path}")
 
             # Load the weights into the model
             missing_keys, unexpected_keys = self.model.load_state_dict(pretrained_weights, strict=False)
