@@ -17,18 +17,19 @@ from datetime import datetime
 # Set memory optimization environment variables first
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# Enable multi-GPU training by default for better memory utilization
+# Enable dual-GPU training for large memory GPUs (48G+)
 # Users can override this by setting CUDA_VISIBLE_DEVICES before running
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
-    # Use all available GPUs for training
     import torch
     if torch.cuda.is_available():
         gpu_count = torch.cuda.device_count()
-        if gpu_count > 1:
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(gpu_count))
-            print(f"Using {gpu_count} GPUs for training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+        if gpu_count >= 2:
+            # Use first two GPUs for training
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+            print(f"Using dual-GPU for training: {os.environ['CUDA_VISIBLE_DEVICES']}")
         else:
             os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            print(f"Using single GPU for training: {os.environ['CUDA_VISIBLE_DEVICES']}")
 
 import torch
 import torch.nn as nn
@@ -203,32 +204,31 @@ class CustomMixLoRATrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load base model
+        # Load base model with smart GPU allocation
         gpu_count = torch.cuda.device_count()
         self.logger.info(f"Available GPUs: {gpu_count}")
 
-        if gpu_count > 1:
-            # Multi-GPU setup - use device_map for model parallelism
-            self.logger.info("Using multi-GPU setup with model parallelism")
+        if gpu_count >= 2:
+            # Dual-GPU setup: load on CPU first, then move to primary GPU
+            self.logger.info("Using dual-GPU setup with DDP")
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.args.base_model,
-                torch_dtype=torch.float16,  # Use FP16 for memory efficiency in multi-GPU
-                device_map="auto",
+                torch_dtype=torch.float16,
                 trust_remote_code=True,
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                device_map=None  # Load on CPU first
             )
-            # Update dtype for multi-GPU
             self.model_dtype = torch.float16
         else:
             # Single GPU setup
             self.logger.info(f"Using single GPU: {self.device}")
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.args.base_model,
-                torch_dtype=torch.float32,
+                torch_dtype=torch.float16,
                 trust_remote_code=True,
                 low_cpu_mem_usage=True
             )
-            self.model_dtype = torch.float32
+            self.model_dtype = torch.float16
 
         self.logger.info(f"Model loaded successfully with dtype: {self.model_dtype}")
 
@@ -292,28 +292,22 @@ class CustomMixLoRATrainer:
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
         # Ensure model and all adapters are properly placed
-        gpu_count = torch.cuda.device_count()
+        # Always move everything to self.device for consistency
+        self.model = self.model.to(self.device)
 
-        if gpu_count <= 1:
-            # Single GPU: move everything to the target device
-            self.model = self.model.to(self.device)
+        # Also ensure all MixLoRA components are on the correct device
+        for layer in self.model.model.layers:
+            if hasattr(layer.mlp, 'mixlora_moes'):
+                for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
+                    moe_layer.to(self.device)
+                    if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
+                        moe_layer.gate_ = moe_layer.gate_.to(self.device)
+                    for expert_name, expert in moe_layer.experts_.items():
+                        expert.to(self.device)
 
-            # Also ensure all MixLoRA components are on the correct device
-            for layer in self.model.model.layers:
-                if hasattr(layer.mlp, 'mixlora_moes'):
-                    for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
-                        moe_layer.to(self.device)
-                        if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
-                            moe_layer.gate_ = moe_layer.gate_.to(self.device)
-                        for expert_name, expert in moe_layer.experts_.items():
-                            expert.to(self.device)
-
-                if hasattr(layer.self_attn, 'mixlora_loras'):
-                    for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
-                        lora_layer.to(self.device)
-        else:
-            # Multi-GPU: let device_map handle placement
-            self.logger.info("Multi-GPU setup: letting device_map handle component placement")
+            if hasattr(layer.self_attn, 'mixlora_loras'):
+                for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
+                    lora_layer.to(self.device)
 
         # Verify all components are on the correct device
         self._verify_device_consistency()
@@ -331,17 +325,9 @@ class CustomMixLoRATrainer:
         sample_layer = self.model.model.layers[0]
 
         # Determine the target device for weights
-        # In multi-GPU setup, use the device of the first layer
-        # In single-GPU setup, use self.device
-        gpu_count = torch.cuda.device_count()
-        if gpu_count > 1:
-            # Multi-GPU: get device from first layer
-            target_device = next(sample_layer.parameters()).device
-            self.logger.info(f"Multi-GPU: Creating weights on device: {target_device}")
-        else:
-            # Single GPU: use self.device
-            target_device = self.device
-            self.logger.info(f"Single-GPU: Creating weights on device: {target_device}")
+        # Always use self.device (cuda:0) for consistency
+        target_device = self.device
+        self.logger.info(f"Creating weights on device: {target_device}")
 
         for layer_idx in range(num_layers):
             # Router gate weights
@@ -444,12 +430,6 @@ class CustomMixLoRATrainer:
 
     def _verify_device_consistency(self):
         """Verify that all model components are on the correct device."""
-        # In multi-GPU setups, we don't enforce a single device
-        gpu_count = torch.cuda.device_count()
-        if gpu_count > 1:
-            self.logger.info(f"Multi-GPU setup detected, skipping strict device consistency check")
-            return
-
         target_device = self.device
 
         # Check main model parameters
@@ -665,18 +645,20 @@ class CustomMixLoRATrainer:
         bf16_available = torch.cuda.is_bf16_supported()
         self.logger.info(f"BF16 support: {bf16_available}")
 
-        if gpu_count > 1:
-            self.logger.info(f"Using FP16 precision for multi-GPU training ({gpu_count} GPUs)")
-            use_fp16 = True
-            use_bf16 = False
+        # Use FP16 for memory efficiency on both single and dual GPU
+        if gpu_count >= 2:
+            self.logger.info(f"Using FP16 precision for dual-GPU training ({gpu_count} GPUs)")
         else:
-            self.logger.info("Using FP32 precision for single GPU training")
-            use_fp16 = False
-            use_bf16 = False
+            self.logger.info("Using FP16 precision for single GPU training")
 
-        # Calculate batch size per device for multi-GPU
-        per_device_batch_size = max(1, self.args.batch_size // max(1, gpu_count))
-        self.logger.info(f"Batch size per device: {per_device_batch_size} (total: {self.args.batch_size}, GPUs: {gpu_count})")
+        use_fp16 = True
+        use_bf16 = False
+
+        # Use the specified batch size per device
+        per_device_batch_size = self.args.batch_size
+        total_batch_size = per_device_batch_size * max(1, gpu_count) * self.args.gradient_accumulation_steps
+        self.logger.info(f"Batch size per device: {per_device_batch_size}")
+        self.logger.info(f"Total effective batch size: {total_batch_size} (GPUs: {gpu_count})")
 
         # Setup training arguments
         training_args = TrainingArguments(
@@ -698,7 +680,7 @@ class CustomMixLoRATrainer:
             bf16=use_bf16,
             fp16=use_fp16,
             # Additional stability settings
-            gradient_checkpointing=gpu_count > 1,  # Enable for multi-GPU to save memory
+            gradient_checkpointing=True,  # Enable to save memory
             max_grad_norm=1.0,  # Gradient clipping
             # Memory optimization
             save_safetensors=True,  # Use safer tensor format
@@ -706,11 +688,12 @@ class CustomMixLoRATrainer:
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             report_to=None,  # Disable wandb for now
-            # Device management for multi-GPU setups
-            ddp_find_unused_parameters=True if gpu_count > 1 else False,  # Enable for multi-GPU
+            # Multi-GPU settings
             dataloader_num_workers=0,  # Avoid multiprocessing issues
-            # Multi-GPU specific settings
             dataloader_drop_last=True,  # Ensure even batch distribution
+            # DDP settings for dual-GPU training
+            ddp_find_unused_parameters=False,  # Set to False for better performance
+            ddp_timeout=1800,  # 30 minutes timeout for large models
         )
 
         # Create trainer
