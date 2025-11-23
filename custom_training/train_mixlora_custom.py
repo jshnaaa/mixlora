@@ -197,6 +197,33 @@ class CustomMixLoRATrainer:
         # Determine target modules
         target_modules = self._get_default_target_modules(self.model.config.model_type)
 
+        # Get the activation function from the base model
+        act_fn = None
+        if hasattr(self.model.config, 'hidden_act'):
+            act_fn = self.model.config.hidden_act
+        elif hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
+            # Try to get activation function from the first layer
+            first_layer = self.model.model.layers[0]
+            if hasattr(first_layer, 'mlp') and hasattr(first_layer.mlp, 'act_fn'):
+                # For models where act_fn is an attribute
+                act_fn_obj = first_layer.mlp.act_fn
+                # Map common activation functions to string names
+                if hasattr(act_fn_obj, '__class__'):
+                    act_fn_name = act_fn_obj.__class__.__name__.lower()
+                    if 'silu' in act_fn_name or 'swish' in act_fn_name:
+                        act_fn = 'silu'
+                    elif 'gelu' in act_fn_name:
+                        act_fn = 'gelu'
+                    elif 'relu' in act_fn_name:
+                        act_fn = 'relu'
+
+        # Default to silu if not found (common for LLaMA models)
+        if act_fn is None:
+            act_fn = 'silu'
+            self.logger.warning(f"Could not determine activation function, defaulting to 'silu'")
+        else:
+            self.logger.info(f"Detected activation function: {act_fn}")
+
         # Create MixLoRA config
         mixlora_config_dict = {
             "base_model_name_or_path": self.args.base_model,
@@ -214,6 +241,7 @@ class CustomMixLoRATrainer:
             "router_aux_loss_coef": self.args.router_aux_loss_coef,
             "router_init_range": self.args.router_init_range,
             "jitter_noise": self.args.jitter_noise,
+            "act_fn": act_fn,  # Add the activation function
         }
 
         self.mixlora_config = MixLoraConfig.from_config(mixlora_config_dict)

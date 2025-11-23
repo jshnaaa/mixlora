@@ -90,6 +90,37 @@ class CustomMixLoRAInference:
         with open(config_path, 'r') as f:
             config_dict = json.load(f)
 
+        # Check if act_fn is missing and add it
+        if 'act_fn' not in config_dict or config_dict['act_fn'] is None:
+            # Get the activation function from the base model
+            act_fn = None
+            if hasattr(self.model.config, 'hidden_act'):
+                act_fn = self.model.config.hidden_act
+            elif hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
+                # Try to get activation function from the first layer
+                first_layer = self.model.model.layers[0]
+                if hasattr(first_layer, 'mlp') and hasattr(first_layer.mlp, 'act_fn'):
+                    # For models where act_fn is an attribute
+                    act_fn_obj = first_layer.mlp.act_fn
+                    # Map common activation functions to string names
+                    if hasattr(act_fn_obj, '__class__'):
+                        act_fn_name = act_fn_obj.__class__.__name__.lower()
+                        if 'silu' in act_fn_name or 'swish' in act_fn_name:
+                            act_fn = 'silu'
+                        elif 'gelu' in act_fn_name:
+                            act_fn = 'gelu'
+                        elif 'relu' in act_fn_name:
+                            act_fn = 'relu'
+
+            # Default to silu if not found (common for LLaMA models)
+            if act_fn is None:
+                act_fn = 'silu'
+                self.logger.warning(f"Could not determine activation function, defaulting to 'silu'")
+            else:
+                self.logger.info(f"Detected activation function: {act_fn}")
+
+            config_dict['act_fn'] = act_fn
+
         self.mixlora_config = MixLoraConfig.from_config(config_dict)
         self.mixlora_config.dtype_ = torch.float16
 
