@@ -17,6 +17,10 @@ from datetime import datetime
 # Set memory optimization environment variables first
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+# CRITICAL: Disable automatic DataParallel at the very beginning
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # For debugging
+os.environ["TORCH_USE_CUDA_DSA"] = "1"     # Additional debugging
+
 # GPU configuration will be set based on command line argument
 # Users can still override by setting CUDA_VISIBLE_DEVICES before running
 # Note: The actual GPU setup is done in the trainer initialization
@@ -24,6 +28,17 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
+
+# NUCLEAR OPTION: Completely disable DataParallel
+# Replace DataParallel with Identity to prevent any usage
+original_DataParallel = torch.nn.DataParallel
+
+def DisabledDataParallel(module, *args, **kwargs):
+    print("[WARNING] DataParallel usage detected and blocked! Using single device instead.")
+    return module  # Just return the original module without wrapping
+
+# Monkey patch to disable DataParallel
+torch.nn.DataParallel = DisabledDataParallel
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -166,32 +181,35 @@ class CustomMixLoRATrainer:
 
     def _setup_gpu_configuration(self):
         """Setup GPU configuration based on num_gpu parameter."""
-        if "CUDA_VISIBLE_DEVICES" not in os.environ:
-            if torch.cuda.is_available():
-                available_gpus = torch.cuda.device_count()
+        if torch.cuda.is_available():
+            available_gpus = torch.cuda.device_count()
 
-                if self.args.num_gpu == 1:
-                    # Single GPU training
-                    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                    print(f"Configured for single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+            if self.args.num_gpu == 1:
+                # FORCE single GPU training - override any existing setting
+                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+                print(f"FORCE single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+                print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
+
+                # Additional check: ensure torch sees only 1 GPU
+                import torch
+                torch.cuda.empty_cache()  # Clear cache
+                print(f"After setting CUDA_VISIBLE_DEVICES=0, torch sees {torch.cuda.device_count()} GPU(s)")
+
+            elif self.args.num_gpu == 2:
+                # Dual GPU training
+                if available_gpus >= 2:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+                    print(f"Configured for dual-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
                     print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
-                elif self.args.num_gpu == 2:
-                    # Dual GPU training
-                    if available_gpus >= 2:
-                        os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-                        print(f"Configured for dual-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
-                        print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
-                    else:
-                        print(f"Warning: Requested {self.args.num_gpu} GPUs but only {available_gpus} available")
-                        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                        print(f"Falling back to single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
-                        self.args.num_gpu = 1  # Update the argument
                 else:
-                    raise ValueError(f"Unsupported num_gpu: {self.args.num_gpu}. Supported values: 1, 2")
+                    print(f"Warning: Requested {self.args.num_gpu} GPUs but only {available_gpus} available")
+                    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+                    print(f"Falling back to single-GPU training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+                    self.args.num_gpu = 1  # Update the argument
             else:
-                print("CUDA not available, using CPU")
+                raise ValueError(f"Unsupported num_gpu: {self.args.num_gpu}. Supported values: 1, 2")
         else:
-            print(f"Using user-specified CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
+            print("CUDA not available, using CPU")
 
     def _get_dataset_config(self) -> Dict[str, str]:
         """Get dataset configuration based on data_id."""
@@ -748,6 +766,11 @@ class CustomMixLoRATrainer:
             local_rank=-1 if self.args.num_gpu == 1 else None,
         )
 
+        # FINAL FIX: Force n_gpu=1 to completely disable DataParallel
+        if self.args.num_gpu == 1:
+            training_args.n_gpu = 1
+            training_args._n_gpu = 1  # Also set private attribute
+
         # Create trainer
         trainer = Trainer(
             model=self.model,
@@ -758,6 +781,11 @@ class CustomMixLoRATrainer:
             tokenizer=self.tokenizer,
             compute_metrics=self.compute_metrics,
         )
+
+        # Double check: manually set trainer's n_gpu if needed
+        if self.args.num_gpu == 1:
+            trainer.args.n_gpu = 1
+            trainer.args._n_gpu = 1
 
         # Add best model tracker callback
         best_model_tracker = BestModelTracker(self)
@@ -821,6 +849,22 @@ class CustomMixLoRATrainer:
 
 
 def main():
+    # CRITICAL: Parse num_gpu argument first and set environment immediately
+    import sys
+    num_gpu = 2  # default
+    for i, arg in enumerate(sys.argv):
+        if arg == "--num_gpu" and i + 1 < len(sys.argv):
+            num_gpu = int(sys.argv[i + 1])
+            break
+
+    # Force GPU configuration at the very beginning
+    if num_gpu == 1:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        print(f"[EARLY SETUP] Forced CUDA_VISIBLE_DEVICES=0 for single GPU training")
+    elif num_gpu == 2:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+        print(f"[EARLY SETUP] Set CUDA_VISIBLE_DEVICES=0,1 for dual GPU training")
+
     parser = argparse.ArgumentParser(description="Train MixLoRA on cultural datasets")
 
     # Dataset configuration
