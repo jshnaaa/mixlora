@@ -261,7 +261,9 @@ class CustomMixLoRATrainer:
         # Inject MixLoRA adapters
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
-        self.logger.info("MixLoRA adapters injected successfully")
+        # Ensure model is on the correct device
+        self.model = self.model.to(self.device)
+        self.logger.info(f"MixLoRA adapters injected successfully, model on device: {next(self.model.parameters()).device}")
 
     def _create_dummy_weights(self) -> Dict[str, torch.Tensor]:
         """Create dummy weights for MixLoRA injection."""
@@ -277,7 +279,7 @@ class CustomMixLoRATrainer:
         for layer_idx in range(num_layers):
             # Router gate weights
             weights[f"mixlora.layers.{layer_idx}.mlp.moe_gate.weight"] = torch.randn(
-                self.args.num_experts, hidden_size, dtype=torch.float16
+                self.args.num_experts, hidden_size, dtype=torch.float16, device=self.device
             ) * self.args.router_init_range
 
             # Expert LoRA weights for each target module
@@ -321,12 +323,12 @@ class CustomMixLoRATrainer:
 
                         # LoRA A matrix
                         weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                            self.args.lora_r, in_features, dtype=torch.float16
+                            self.args.lora_r, in_features, dtype=torch.float16, device=self.device
                         ) * 0.01
 
                         # LoRA B matrix
                         weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                            out_features, self.args.lora_r, dtype=torch.float16
+                            out_features, self.args.lora_r, dtype=torch.float16, device=self.device
                         )
 
                 except Exception as e:
@@ -359,12 +361,12 @@ class CustomMixLoRATrainer:
 
                     # LoRA A matrix (in_features -> rank)
                     weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                        self.args.lora_r, in_features, dtype=torch.float16
+                        self.args.lora_r, in_features, dtype=torch.float16, device=self.device
                     ) * 0.01
 
                     # LoRA B matrix (rank -> out_features)
                     weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                        out_features, self.args.lora_r, dtype=torch.float16
+                        out_features, self.args.lora_r, dtype=torch.float16, device=self.device
                     )
 
                 except Exception as e:
@@ -603,6 +605,10 @@ class CustomMixLoRATrainer:
 
         # Store reference for saving adapter weights
         self.trainer = trainer
+
+        # Final device verification before training
+        self.logger.info(f"Final device check - Model device: {next(self.model.parameters()).device}")
+        self.logger.info(f"Training device: {self.device}")
 
         # Train
         trainer.train()

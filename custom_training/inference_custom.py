@@ -76,10 +76,12 @@ class CustomMixLoRAInference:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Load base model
+        # Avoid device_map="auto" to prevent device inconsistency issues
         self.model = AutoModelForCausalLM.from_pretrained(
             self.base_model_path,
             torch_dtype=torch.float16,
-            device_map="auto"
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
         )
 
         # Load adapter config
@@ -130,6 +132,10 @@ class CustomMixLoRAInference:
         # Inject MixLoRA adapters
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
+        # Ensure model is on the correct device
+        self.model = self.model.to(self.device)
+        self.logger.info(f"Model on device: {next(self.model.parameters()).device}")
+
         # Load trained adapter weights
         adapter_weights_path = os.path.join(self.adapter_path, "adapter_model.bin")
         if not os.path.exists(adapter_weights_path):
@@ -155,7 +161,7 @@ class CustomMixLoRAInference:
         for layer_idx in range(num_layers):
             # Router gate weights
             weights[f"mixlora.layers.{layer_idx}.mlp.moe_gate.weight"] = torch.randn(
-                self.mixlora_config.num_experts_, hidden_size, dtype=torch.float16
+                self.mixlora_config.num_experts_, hidden_size, dtype=torch.float16, device=self.device
             ) * self.mixlora_config.router_init_range_
 
             # Expert LoRA weights for each target module
@@ -199,12 +205,12 @@ class CustomMixLoRAInference:
 
                         # LoRA A matrix
                         weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                            self.mixlora_config.lora_r_, in_features, dtype=torch.float16
+                            self.mixlora_config.lora_r_, in_features, dtype=torch.float16, device=self.device
                         ) * 0.01
 
                         # LoRA B matrix
                         weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                            out_features, self.mixlora_config.lora_r_, dtype=torch.float16
+                            out_features, self.mixlora_config.lora_r_, dtype=torch.float16, device=self.device
                         )
 
                 except Exception as e:
@@ -237,12 +243,12 @@ class CustomMixLoRAInference:
 
                     # LoRA A matrix (in_features -> rank)
                     weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                        self.mixlora_config.lora_r_, in_features, dtype=torch.float16
+                        self.mixlora_config.lora_r_, in_features, dtype=torch.float16, device=self.device
                     ) * 0.01
 
                     # LoRA B matrix (rank -> out_features)
                     weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                        out_features, self.mixlora_config.lora_r_, dtype=torch.float16
+                        out_features, self.mixlora_config.lora_r_, dtype=torch.float16, device=self.device
                     )
 
                 except Exception as e:
