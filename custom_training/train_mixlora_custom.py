@@ -261,8 +261,26 @@ class CustomMixLoRATrainer:
         # Inject MixLoRA adapters
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
-        # Ensure model is on the correct device
+        # CRITICAL: Ensure model and all adapters are on the correct device
+        # This is necessary because LoRA weights might be on different devices after injection
         self.model = self.model.to(self.device)
+
+        # Also ensure all MixLoRA components are on the correct device
+        for layer in self.model.model.layers:
+            if hasattr(layer.mlp, 'mixlora_moes'):
+                for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
+                    moe_layer.to(self.device)
+                    if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
+                        moe_layer.gate_ = moe_layer.gate_.to(self.device)
+                    for expert_name, expert in moe_layer.experts_.items():
+                        expert.to(self.device)
+
+            if hasattr(layer.self_attn, 'mixlora_loras'):
+                for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
+                    lora_layer.to(self.device)
+
+        # Verify all components are on the correct device
+        self._verify_device_consistency()
         self.logger.info(f"MixLoRA adapters injected successfully, model on device: {next(self.model.parameters()).device}")
 
     def _create_dummy_weights(self) -> Dict[str, torch.Tensor]:
@@ -374,6 +392,32 @@ class CustomMixLoRATrainer:
                     continue
 
         return weights
+
+    def _verify_device_consistency(self):
+        """Verify that all model components are on the correct device."""
+        target_device = self.device
+
+        # Check main model parameters
+        for name, param in self.model.named_parameters():
+            if param.device != target_device:
+                self.logger.warning(f"Parameter {name} on device {param.device}, expected {target_device}")
+
+        # Check MixLoRA components specifically
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            if hasattr(layer.mlp, 'mixlora_moes'):
+                for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
+                    # Check gate weights
+                    if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
+                        if moe_layer.gate_.device != target_device:
+                            self.logger.warning(f"Layer {layer_idx} MoE gate on device {moe_layer.gate_.device}, expected {target_device}")
+
+                    # Check expert weights
+                    for expert_name, expert in moe_layer.experts_.items():
+                        for param_name, param in expert.named_parameters():
+                            if param.device != target_device:
+                                self.logger.warning(f"Layer {layer_idx} expert {expert_name} param {param_name} on device {param.device}, expected {target_device}")
+
+        self.logger.info(f"Device consistency check completed for device: {target_device}")
 
     def setup_datasets(self):
         """Setup training, validation, and test datasets with 8:1:1 split."""

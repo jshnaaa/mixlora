@@ -132,8 +132,24 @@ class CustomMixLoRAInference:
         # Inject MixLoRA adapters
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
-        # Ensure model is on the correct device
+        # CRITICAL: Ensure model and all adapters are on the correct device
+        # This is necessary because LoRA weights might be on different devices after injection
         self.model = self.model.to(self.device)
+
+        # Also ensure all MixLoRA components are on the correct device
+        for layer in self.model.model.layers:
+            if hasattr(layer.mlp, 'mixlora_moes'):
+                for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
+                    moe_layer.to(self.device)
+                    if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
+                        moe_layer.gate_ = moe_layer.gate_.to(self.device)
+                    for expert_name, expert in moe_layer.experts_.items():
+                        expert.to(self.device)
+
+            if hasattr(layer.self_attn, 'mixlora_loras'):
+                for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
+                    lora_layer.to(self.device)
+
         self.logger.info(f"Model on device: {next(self.model.parameters()).device}")
 
         # Load trained adapter weights
