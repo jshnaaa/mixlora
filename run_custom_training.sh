@@ -28,69 +28,57 @@ case $BACKBONE in
         ;;
 esac
 
-# Function to get LoRA weights path based on backbone and data_id
-get_lora_weights_path() {
-    local backbone=$1
-    local data_id=$2
-
-    case "${data_id}_${backbone}" in
-        # unified_all_datasets_small
-        "0_qwen")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_small_qwen_20251111_1530/best_lora"
-            ;;
-        "0_llama")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_small_llama_20251111_1530/best_lora"
-            ;;
-        # unified_all_datasets
-        "1_qwen")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_qwen_20251111_1530/best_lora"
-            ;;
-        "1_llama")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_llama_20251111_1530/best_lora"
-            ;;
-        # CulturalBench
-        "2_qwen")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_qwen_20251112_1228/best_lora"
-            ;;
-        "2_llama")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_llama_20251112_1141/best_lora"
-            ;;
-        # NormAD
-        "3_qwen")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_qwen_20251111_1204/best_lora"
-            ;;
-        "3_llama")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_llama_20251112_1335/best_lora"
-            ;;
-        # CultureLLM
-        "4_qwen")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_qwen_20251111_1530/best_lora"
-            ;;
-        "4_llama")
-            echo "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_llama_20251111_1530/best_lora"
-            ;;
-        *)
-            echo ""
-            ;;
-    esac
-}
-
 # Dataset configuration
 case $DATA_ID in
     0)
+        # unified_all_datasets_small
         DATASET_TAG="unified_small"
+        if [ "$BACKBONE" = "qwen" ]; then
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_small_qwen_20251111_1530/best_lora"
+        else
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_small_llama_20251111_1530/best_lora"
+        fi
+        echo "Using unified_all_datasets_small"
         ;;
     1)
+        # unified_all_datasets
         DATASET_TAG="unified"
+        if [ "$BACKBONE" = "qwen" ]; then
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_qwen_20251111_1530/best_lora"
+        else
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_llama_20251111_1530/best_lora"
+        fi
+        echo "Using unified_all_datasets"
         ;;
     2)
+        # CulturalBench
         DATASET_TAG="culturalbench"
+        if [ "$BACKBONE" = "qwen" ]; then
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_qwen_20251112_1228/best_lora"
+        else
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_llama_20251112_1141/best_lora"
+        fi
+        echo "Using CulturalBench dataset"
         ;;
     3)
+        # NormAD
         DATASET_TAG="normad"
+        if [ "$BACKBONE" = "qwen" ]; then
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_qwen_20251111_1204/best_lora"
+        else
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_llama_20251112_1335/best_lora"
+        fi
+        echo "Using NormAD dataset"
         ;;
     4)
+        # CultureLLM
         DATASET_TAG="cultureLLM"
+        if [ "$BACKBONE" = "qwen" ]; then
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_qwen_20251111_1530/best_lora"
+        else
+            LORA_WEIGHTS_PATH="/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_llama_20251111_1530/best_lora"
+        fi
+        echo "Using CultureLLM dataset"
         ;;
     *)
         echo "Error: Unsupported data_id '$DATA_ID'. Supported values: 0, 1, 2, 3, 4"
@@ -188,14 +176,11 @@ case $TRAINING_MODE in
     "mixlora")
         echo "🔒 MixLoRA-only training mode with auto LoRA path detection"
 
-        # Get LoRA path based on backbone and data_id
-        PRETRAINED_LORA_PATH=$(get_lora_weights_path "$BACKBONE" "$DATA_ID")
+        if [ -n "$LORA_WEIGHTS_PATH" ]; then
+            echo "Using LoRA weights: $LORA_WEIGHTS_PATH"
 
-        if [ -n "$PRETRAINED_LORA_PATH" ]; then
-            echo "Using LoRA weights: $PRETRAINED_LORA_PATH"
-
-            if [ -e "$PRETRAINED_LORA_PATH" ]; then
-                MIXLORA_ARGS="--pretrained_lora_path \"$PRETRAINED_LORA_PATH\" --train_mixlora_only"
+            if [ -e "$LORA_WEIGHTS_PATH" ]; then
+                MIXLORA_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\" --train_mixlora_only"
             else
                 echo "Warning: LoRA path not found, will use auto-detection in Python"
                 MIXLORA_ARGS="--train_mixlora_only"
