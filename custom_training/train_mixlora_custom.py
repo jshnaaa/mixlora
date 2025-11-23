@@ -194,9 +194,10 @@ class CustomMixLoRATrainer:
 
         # Load base model
         self.logger.info(f"Loading model on device: {self.device}")
+        # Use FP32 for maximum stability with MixLoRA
         self.model = AutoModelForCausalLM.from_pretrained(
             self.args.base_model,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.float32,
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
@@ -253,7 +254,7 @@ class CustomMixLoRATrainer:
         }
 
         self.mixlora_config = MixLoraConfig.from_config(mixlora_config_dict)
-        self.mixlora_config.dtype_ = torch.float16
+        self.mixlora_config.dtype_ = torch.float32  # Use FP32 for stability
 
         # Initialize MixLoRA weights
         dummy_weights = self._create_dummy_weights()
@@ -297,7 +298,7 @@ class CustomMixLoRATrainer:
         for layer_idx in range(num_layers):
             # Router gate weights
             weights[f"mixlora.layers.{layer_idx}.mlp.moe_gate.weight"] = torch.randn(
-                self.args.num_experts, hidden_size, dtype=torch.float16, device=self.device
+                self.args.num_experts, hidden_size, dtype=torch.float32, device=self.device
             ) * self.args.router_init_range
 
             # Expert LoRA weights for each target module
@@ -341,12 +342,12 @@ class CustomMixLoRATrainer:
 
                         # LoRA A matrix
                         weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                            self.args.lora_r, in_features, dtype=torch.float16, device=self.device
+                            self.args.lora_r, in_features, dtype=torch.float32, device=self.device
                         ) * 0.01
 
                         # LoRA B matrix
                         weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                            out_features, self.args.lora_r, dtype=torch.float16, device=self.device
+                            out_features, self.args.lora_r, dtype=torch.float32, device=self.device
                         )
 
                 except Exception as e:
@@ -379,12 +380,12 @@ class CustomMixLoRATrainer:
 
                     # LoRA A matrix (in_features -> rank)
                     weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                        self.args.lora_r, in_features, dtype=torch.float16, device=self.device
+                        self.args.lora_r, in_features, dtype=torch.float32, device=self.device
                     ) * 0.01
 
                     # LoRA B matrix (rank -> out_features)
                     weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                        out_features, self.args.lora_r, dtype=torch.float16, device=self.device
+                        out_features, self.args.lora_r, dtype=torch.float32, device=self.device
                     )
 
                 except Exception as e:
@@ -605,6 +606,11 @@ class CustomMixLoRATrainer:
         total_steps = len(self.train_dataset) // (self.args.batch_size * self.args.gradient_accumulation_steps) * self.args.num_epochs
         eval_steps = max(1, total_steps // (self.args.num_epochs // self.args.eval_interval)) if self.args.eval_interval > 0 else total_steps
 
+        # Check precision support
+        bf16_available = torch.cuda.is_bf16_supported()
+        self.logger.info(f"BF16 support: {bf16_available}")
+        self.logger.info("Using FP32 precision for training (mixed precision disabled for MixLoRA stability)")
+
         # Setup training arguments
         training_args = TrainingArguments(
             output_dir=self.output_dir,
@@ -621,7 +627,12 @@ class CustomMixLoRATrainer:
             evaluation_strategy="steps",
             save_strategy="steps",
             load_best_model_at_end=False,  # We handle this manually
-            fp16=True,
+            # Disable all mixed precision for maximum stability with MixLoRA
+            bf16=False,  # Disable bf16 to avoid potential issues
+            fp16=False,  # Disable fp16 to avoid gradient scaling issues with MixLoRA
+            # Additional stability settings
+            gradient_checkpointing=False,  # Disable to avoid memory issues
+            max_grad_norm=1.0,  # Gradient clipping
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             report_to=None,  # Disable wandb for now
