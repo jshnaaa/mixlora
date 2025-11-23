@@ -248,26 +248,35 @@ class CustomMixLoRATrainer:
                 if not is_target:
                     continue
 
-                # Get dimensions based on module type
+                # Get actual dimensions from the model layer
                 try:
-                    if module_name in ["gate_proj", "up_proj"]:
-                        in_features = hidden_size
-                        out_features = self.model.config.intermediate_size
-                    elif module_name == "down_proj":
-                        in_features = self.model.config.intermediate_size
-                        out_features = hidden_size
-                    elif module_name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
-                        in_features = hidden_size
-                        out_features = hidden_size
-                    elif module_name == "fc1":
-                        in_features = hidden_size
-                        out_features = self.model.config.intermediate_size
-                    elif module_name == "fc2":
-                        in_features = self.model.config.intermediate_size
-                        out_features = hidden_size
+                    if hasattr(sample_layer.mlp, module_name):
+                        actual_layer = getattr(sample_layer.mlp, module_name)
+                        if hasattr(actual_layer, 'weight'):
+                            out_features, in_features = actual_layer.weight.shape
+                        elif hasattr(actual_layer, 'in_features') and hasattr(actual_layer, 'out_features'):
+                            in_features = actual_layer.in_features
+                            out_features = actual_layer.out_features
+                        else:
+                            # Fallback based on module type
+                            if module_name in ["gate_proj", "up_proj"]:
+                                in_features = hidden_size
+                                out_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                            elif module_name == "down_proj":
+                                in_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                                out_features = hidden_size
+                            elif module_name == "fc1":
+                                in_features = hidden_size
+                                out_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                            elif module_name == "fc2":
+                                in_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                                out_features = hidden_size
+                            else:
+                                in_features = hidden_size
+                                out_features = hidden_size
                     else:
-                        in_features = hidden_size
-                        out_features = hidden_size
+                        # Module doesn't exist, skip
+                        continue
 
                     # Create LoRA weights for each expert
                     for expert_idx in range(self.args.num_experts):
@@ -294,21 +303,22 @@ class CustomMixLoRATrainer:
 
                 prefix = f"mixlora.layers.{layer_idx}.self_attn.{module_name}"
 
-                # Get actual dimensions for attention modules
+                # Get actual dimensions from the model layer
                 try:
-                    if module_name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
-                        in_features = hidden_size
-                        out_features = hidden_size
-                    elif module_name == "qkv_proj":  # For Phi3
-                        in_features = hidden_size
-                        out_features = hidden_size * 3  # q, k, v combined
-                    elif module_name == "dense":  # For some Phi models
-                        in_features = hidden_size
-                        out_features = hidden_size
+                    if hasattr(sample_layer.self_attn, module_name):
+                        actual_layer = getattr(sample_layer.self_attn, module_name)
+                        if hasattr(actual_layer, 'weight'):
+                            out_features, in_features = actual_layer.weight.shape
+                        elif hasattr(actual_layer, 'in_features') and hasattr(actual_layer, 'out_features'):
+                            in_features = actual_layer.in_features
+                            out_features = actual_layer.out_features
+                        else:
+                            # Fallback to config values
+                            in_features = hidden_size
+                            out_features = hidden_size
                     else:
-                        # Default to hidden_size for unknown modules
-                        in_features = hidden_size
-                        out_features = hidden_size
+                        # Module doesn't exist, skip
+                        continue
 
                     # LoRA A matrix (in_features -> rank)
                     weights[f"{prefix}.lora_A.weight"] = torch.randn(
