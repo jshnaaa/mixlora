@@ -14,6 +14,11 @@ from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 
+# Set single GPU by default to avoid device inconsistency issues
+# Users can override this by setting CUDA_VISIBLE_DEVICES before running
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -188,11 +193,14 @@ class CustomMixLoRATrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Load base model
+        self.logger.info(f"Loading model on device: {self.device}")
         self.model = AutoModelForCausalLM.from_pretrained(
             self.args.base_model,
             torch_dtype=torch.float16,
-            device_map="auto"
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
         )
+        self.logger.info("Model loaded successfully")
 
         # Determine target modules
         target_modules = self._get_default_target_modules(self.model.config.model_type)
@@ -571,6 +579,11 @@ class CustomMixLoRATrainer:
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             report_to=None,  # Disable wandb for now
+            # Device management for multi-GPU setups
+            ddp_find_unused_parameters=False,  # Improve performance
+            dataloader_num_workers=0,  # Avoid multiprocessing issues
+            # Ensure consistent device handling
+            dispatch_batches=False,  # Let trainer handle batch dispatch
         )
 
         # Create trainer
