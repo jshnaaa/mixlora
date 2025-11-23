@@ -2,10 +2,27 @@
 
 # Custom training script for MixLoRA on cultural datasets
 # Supports automatic dataset splitting, best model saving, and comprehensive evaluation
+# Usage: ./run_custom_training.sh [BACKBONE] [DATA_ID]
+# BACKBONE: llama (default) | qwen
+# DATA_ID: 2 (culturalbench, default) | 3 (normad)
 
-# Dataset configuration
-DATA_ID=2  # 2=culturalbench, 3=normad
-BASE_MODEL="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct"
+# Parse command line arguments
+BACKBONE=${1:-"llama"}  # Default to llama
+DATA_ID=${2:-2}         # Default to culturalbench
+
+# Model configuration based on backbone
+case $BACKBONE in
+    "llama")
+        BASE_MODEL="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct"
+        ;;
+    "qwen")
+        BASE_MODEL="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Qwen-2.5-7B-Instruct"
+        ;;
+    *)
+        echo "Error: Unsupported backbone '$BACKBONE'. Supported values: llama, qwen"
+        exit 1
+        ;;
+esac
 
 # MixLoRA parameters
 NUM_EXPERTS=8
@@ -39,6 +56,7 @@ WANDB_PROJECT="mixlora-cultural-datasets"
 RUN_NAME="mixlora-data${DATA_ID}-$(date +%Y%m%d_%H%M%S)"
 
 echo "Starting MixLoRA training on cultural dataset..."
+echo "Backbone: $BACKBONE"
 echo "Dataset ID: $DATA_ID"
 echo "Base model: $BASE_MODEL"
 echo "Run name: $RUN_NAME"
@@ -53,6 +71,7 @@ fi
 # Run training
 python train_mixlora_custom.py \
     --data_id $DATA_ID \
+    --backbone "$BACKBONE" \
     --base_model "$BASE_MODEL" \
     --num_experts $NUM_EXPERTS \
     --top_k $TOP_K \
@@ -85,6 +104,14 @@ echo "Training completed!"
 # 4. Evaluates the best model on test set
 # 5. Saves all results to output directory
 
+echo ""
+echo "Usage examples:"
+echo "  ./run_custom_training.sh                    # Train with llama on culturalbench"
+echo "  ./run_custom_training.sh llama 2           # Train with llama on culturalbench"
+echo "  ./run_custom_training.sh qwen 2            # Train with qwen on culturalbench"
+echo "  ./run_custom_training.sh llama 3           # Train with llama on normad"
+echo "  ./run_custom_training.sh qwen 3            # Train with qwen on normad"
+echo ""
 echo "Check the output directory for:"
 echo "- best_model/: Best model adapter weights"
 echo "- training_config.json: Training configuration"

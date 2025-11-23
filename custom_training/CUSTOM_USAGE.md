@@ -33,24 +33,33 @@ custom_training/
 ### 1. 训练模型
 
 ```bash
-# 使用默认参数训练（DATA_ID=2, culturalbench数据集）
+# 使用默认参数训练（llama + culturalbench）
 ./run_custom_training.sh
 
-# 或者训练normad数据集（DATA_ID=3）
-# 编辑 run_custom_training.sh 中的 DATA_ID=3
+# 训练不同组合
+./run_custom_training.sh llama 2    # LLaMA + culturalbench
+./run_custom_training.sh qwen 2     # Qwen + culturalbench
+./run_custom_training.sh llama 3    # LLaMA + normad
+./run_custom_training.sh qwen 3     # Qwen + normad
 ```
 
 ### 2. 推理评估
 
 ```bash
-# 自动找到最新训练的模型并在外部测试集上评估
+# 自动找到最新训练的模型并评估（自动检测backbone）
 ./run_custom_inference.sh --adapter_path auto --dataset_path /path/to/external_test.json
 
-# 指定特定模型进行评估
-./run_custom_inference.sh --adapter_path /root/autodl-fs/data/mixlora/culturalbench_llama_20241122_1430/best_model --dataset_path /path/to/test.json
+# 自动找到最新的qwen模型并评估
+./run_custom_inference.sh --adapter_path auto --backbone qwen --dataset_path /path/to/test.json
 
-# 交互式推理
+# 指定特定模型进行评估
+./run_custom_inference.sh --adapter_path /root/autodl-fs/data/mixlora/culturalbench_qwen_20241122_1430/best_model --dataset_path /path/to/test.json
+
+# 交互式推理（自动检测最新模型）
 ./run_custom_inference.sh --adapter_path auto --interactive
+
+# 交互式推理（指定backbone）
+./run_custom_inference.sh --adapter_path auto --backbone qwen --interactive
 ```
 
 ## 📊 数据集配置
@@ -74,9 +83,15 @@ custom_training/
 
 ## 🔧 训练配置
 
+### 支持的模型架构
+| BACKBONE | 模型路径 | 支持状态 |
+|----------|----------|----------|
+| llama | `/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct` | ✅ 完全支持 |
+| qwen | `/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Qwen-2.5-7B-Instruct` | ✅ 完全支持 |
+
 ### 模型参数
 ```bash
-BASE_MODEL="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct"
+BACKBONE="llama"       # 模型架构：llama 或 qwen
 NUM_EXPERTS=8          # MoE专家数量
 TOP_K=2               # 路由选择的专家数量
 LORA_R=8              # LoRA秩
@@ -107,7 +122,7 @@ EVAL_INTERVAL=1                # 每轮都进行验证评估
 
 ### 输出目录结构
 ```
-/root/autodl-fs/data/mixlora/${DATASET_TAG}_llama_YYYYMMDD_HHMM/
+/root/autodl-fs/data/mixlora/${DATASET_TAG}_${BACKBONE}_YYYYMMDD_HHMM/
 ├── best_model/
 │   ├── adapter_config.json     # 适配器配置
 │   └── adapter_model.bin       # 适配器权重
@@ -116,6 +131,11 @@ EVAL_INTERVAL=1                # 每轮都进行验证评估
 ├── generated_answers.json      # 验证集生成答案
 └── test_results.json          # 测试集最终结果
 ```
+
+**示例目录名称**：
+- `culturalbench_llama_20241122_1430/` - LLaMA在CulturalBench上的训练
+- `culturalbench_qwen_20241122_1430/` - Qwen在CulturalBench上的训练
+- `normad_llama_20241122_1430/` - LLaMA在NorMaD上的训练
 
 ## 🎯 评估指标
 
@@ -154,21 +174,49 @@ EVAL_INTERVAL=1                # 每轮都进行验证评估
 
 ### 1. 外部数据集评估
 ```bash
+# 自动检测backbone
 ./run_custom_inference.sh \
     --adapter_path /path/to/best_model \
-    --dataset_path /path/to/external_test.json \
-    --output_file evaluation_results.json
+    --dataset_path /path/to/external_test.json
+
+# 明确指定backbone
+./run_custom_inference.sh \
+    --adapter_path /path/to/best_model \
+    --backbone qwen \
+    --dataset_path /path/to/external_test.json
 ```
 
 ### 2. 交互式推理
 ```bash
-./run_custom_inference.sh \
-    --adapter_path auto \
-    --interactive
+# 自动找到最新模型（任意backbone）
+./run_custom_inference.sh --adapter_path auto --interactive
+
+# 自动找到最新的qwen模型
+./run_custom_inference.sh --adapter_path auto --backbone qwen --interactive
 ```
 
-### 3. 自动模型检测
-使用 `--adapter_path auto` 会自动找到最新训练的模型。
+### 3. 智能模型检测
+- **自动路径检测**: 使用 `--adapter_path auto` 自动找到最新训练的模型
+- **智能backbone检测**: 从路径中自动识别模型架构（llama/qwen）
+- **灵活筛选**: 可以指定backbone来筛选特定架构的模型
+
+### 4. 多模型管理
+```bash
+# 列出所有训练的模型
+ls -la /root/autodl-fs/data/mixlora/
+
+# 示例输出：
+# culturalbench_llama_20241122_1430/
+# culturalbench_qwen_20241122_1435/
+# normad_llama_20241122_1440/
+# normad_qwen_20241122_1445/
+
+# 自动选择最新的llama模型
+./run_custom_inference.sh --adapter_path auto --backbone llama --interactive
+
+# 自动选择最新的qwen模型
+./run_custom_inference.sh --adapter_path auto --backbone qwen --interactive
+```
 
 ## 🎛️ 高级配置
 
@@ -251,29 +299,51 @@ configs = {
 
 ### 完整训练和评估流程
 ```bash
-# 1. 训练模型（culturalbench数据集）
-./run_custom_training.sh
+# 1. 训练LLaMA模型（culturalbench数据集）
+./run_custom_training.sh llama 2
 
-# 2. 查看训练结果
-ls -la /root/autodl-fs/data/mixlora/culturalbench_llama_*/
+# 2. 训练Qwen模型（同一数据集）
+./run_custom_training.sh qwen 2
 
-# 3. 在外部测试集上评估
-./run_custom_inference.sh \
-    --adapter_path auto \
-    --dataset_path /path/to/external_test.json \
-    --output_file external_evaluation.json
+# 3. 查看训练结果
+ls -la /root/autodl-fs/data/mixlora/culturalbench_*/
 
-# 4. 查看评估结果
-cat external_evaluation.json
+# 4. 比较不同模型在外部测试集上的表现
+./run_custom_inference.sh --adapter_path auto --backbone llama --dataset_path /path/to/test.json --output_file llama_results.json
+./run_custom_inference.sh --adapter_path auto --backbone qwen --dataset_path /path/to/test.json --output_file qwen_results.json
+
+# 5. 查看和比较评估结果
+echo "LLaMA Results:" && cat llama_results.json | grep '"accuracy"'
+echo "Qwen Results:" && cat qwen_results.json | grep '"accuracy"'
 ```
 
 ### 训练normad数据集
 ```bash
-# 修改run_custom_training.sh中的DATA_ID=3
-sed -i 's/DATA_ID=2/DATA_ID=3/' run_custom_training.sh
+# 训练LLaMA在normad数据集上
+./run_custom_training.sh llama 3
 
-# 开始训练
-./run_custom_training.sh
+# 训练Qwen在normad数据集上
+./run_custom_training.sh qwen 3
+
+# 查看结果
+ls -la /root/autodl-fs/data/mixlora/normad_*/
+```
+
+### 模型架构对比实验
+```bash
+# 1. 在同一数据集上训练不同架构
+./run_custom_training.sh llama 2  # LLaMA + CulturalBench
+./run_custom_training.sh qwen 2   # Qwen + CulturalBench
+
+# 2. 在不同数据集上训练同一架构
+./run_custom_training.sh llama 2  # LLaMA + CulturalBench
+./run_custom_training.sh llama 3  # LLaMA + NorMaD
+
+# 3. 全矩阵实验
+./run_custom_training.sh llama 2  # LLaMA + CulturalBench
+./run_custom_training.sh llama 3  # LLaMA + NorMaD
+./run_custom_training.sh qwen 2   # Qwen + CulturalBench
+./run_custom_training.sh qwen 3   # Qwen + NorMaD
 ```
 
 这套定制的训练系统完全满足您的所有需求，提供了完整的训练、评估和推理流程！

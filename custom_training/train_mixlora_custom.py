@@ -44,6 +44,7 @@ class CustomTrainingArguments:
 
     # Dataset configuration
     data_id: int = field(default=2, metadata={"help": "Dataset ID (2=culturalbench, 3=normad)"})
+    backbone: str = field(default="llama", metadata={"help": "Model backbone (llama, qwen)"})
     base_model: str = field(default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
                            metadata={"help": "Base model path"})
 
@@ -141,7 +142,7 @@ class CustomMixLoRATrainer:
         self.dataset_config = self._get_dataset_config()
 
         # Set up output directory
-        self.output_dir = f"/root/autodl-fs/data/mixlora/{self.dataset_config['tag']}_llama_{datetime.now().strftime('%Y%m%d_%H%M')}"
+        self.output_dir = f"/root/autodl-fs/data/mixlora/{self.dataset_config['tag']}_{self.args.backbone}_{datetime.now().strftime('%Y%m%d_%H%M')}"
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.logger.info(f"Output directory: {self.output_dir}")
@@ -579,6 +580,7 @@ def main():
 
     # Dataset configuration
     parser.add_argument("--data_id", type=int, default=2, help="Dataset ID (2=culturalbench, 3=normad)")
+    parser.add_argument("--backbone", type=str, default="llama", help="Model backbone (llama, qwen)")
     parser.add_argument("--base_model", type=str,
                        default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
                        help="Base model path")
