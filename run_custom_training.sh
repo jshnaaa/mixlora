@@ -2,15 +2,17 @@
 
 # Custom training script for MixLoRA on cultural datasets
 # Supports automatic dataset splitting, best model saving, and comprehensive evaluation
-# Usage: ./run_custom_training.sh [BACKBONE] [DATA_ID] [NUM_GPU]
+# Usage: ./run_custom_training.sh [BACKBONE] [DATA_ID] [NUM_GPU] [PRETRAINED_LORA_PATH]
 # BACKBONE: llama (default) | qwen
-# DATA_ID: 2 (culturalbench, default) | 3 (normad)
+# DATA_ID: 2 (culturalbench, default) | 3 (normad) | 0 (unified_small) | 1 (unified) | 4 (cultureLLM)
 # NUM_GPU: 2 (dual-GPU, default) | 1 (single-GPU)
+# PRETRAINED_LORA_PATH: Path to pretrained LoRA model (optional, auto-detected if not provided for MixLoRA-only training)
 
 # Parse command line arguments
 BACKBONE=${1:-"llama"}  # Default to llama
 DATA_ID=${2:-2}         # Default to culturalbench
 NUM_GPU=${3:-2}         # Default to dual-GPU
+TRAINING_MODE=${4:-"full"}  # Default to full training
 
 # Model configuration based on backbone
 case $BACKBONE in
@@ -28,14 +30,23 @@ esac
 
 # Dataset configuration
 case $DATA_ID in
+    0)
+        DATASET_TAG="unified_small"
+        ;;
+    1)
+        DATASET_TAG="unified"
+        ;;
     2)
         DATASET_TAG="culturalbench"
         ;;
     3)
         DATASET_TAG="normad"
         ;;
+    4)
+        DATASET_TAG="cultureLLM"
+        ;;
     *)
-        echo "Error: Unsupported data_id '$DATA_ID'. Supported values: 2, 3"
+        echo "Error: Unsupported data_id '$DATA_ID'. Supported values: 0, 1, 2, 3, 4"
         exit 1
         ;;
 esac
@@ -75,17 +86,29 @@ LORA_DROPOUT=0.05
 # Training parameters (optimized for 48G GPU with BF16/FP32)
 MAX_LENGTH=512
 
-# Adjust batch size based on GPU configuration
-if [ "$GPU_CONFIG" = "single" ]; then
-    # Extreme memory optimization for single GPU
-    BATCH_SIZE=4   # Much smaller batch size to avoid OOM
-    GRADIENT_ACCUMULATION_STEPS=15  # Total effective batch size = 4 * 15 = 60
-    echo "Single-GPU (Memory Optimized): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=60"
+# Adjust batch size based on GPU configuration and training mode
+if [ "$TRAINING_MODE" != "full" ]; then
+    # MixLoRA-only training: Can use larger batch sizes due to frozen parameters
+    if [ "$GPU_CONFIG" = "single" ]; then
+        BATCH_SIZE=8   # Larger batch size for MixLoRA-only training
+        GRADIENT_ACCUMULATION_STEPS=8  # Total effective batch size = 8 * 8 = 64
+        echo "Single-GPU (MixLoRA-only): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=64"
+    else
+        BATCH_SIZE=6   # Larger per device batch size for MixLoRA-only
+        GRADIENT_ACCUMULATION_STEPS=6  # Total effective batch size = 6 * 2 * 6 = 72
+        echo "Dual-GPU (MixLoRA-only): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=72"
+    fi
 else
-    # AGGRESSIVE memory optimization for dual-GPU (47GB each)
-    BATCH_SIZE=2   # Very small per device batch size to avoid OOM
-    GRADIENT_ACCUMULATION_STEPS=16  # Total effective batch size = 2 * 2 * 16 = 64
-    echo "Dual-GPU (Memory Optimized): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=64"
+    # Full model training: Use conservative batch sizes
+    if [ "$GPU_CONFIG" = "single" ]; then
+        BATCH_SIZE=4   # Much smaller batch size to avoid OOM
+        GRADIENT_ACCUMULATION_STEPS=15  # Total effective batch size = 4 * 15 = 60
+        echo "Single-GPU (Full Training): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=60"
+    else
+        BATCH_SIZE=2   # Very small per device batch size to avoid OOM
+        GRADIENT_ACCUMULATION_STEPS=16  # Total effective batch size = 2 * 2 * 16 = 64
+        echo "Dual-GPU (Full Training): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=64"
+    fi
 fi
 
 LEARNING_RATE=1e-4
@@ -108,6 +131,32 @@ echo "Dataset ID: $DATA_ID ($DATASET_TAG)"
 echo "Base model: $BASE_MODEL"
 echo "Output directory: $OUTPUT_DIR"
 echo "Run name: $RUN_NAME"
+
+# Determine training mode and configure arguments
+case $TRAINING_MODE in
+    "full")
+        echo "🎯 Full model training mode"
+        MIXLORA_ARGS=""
+        ;;
+    "mixlora")
+        echo "🔒 MixLoRA-only training mode with auto LoRA path detection"
+        echo "Will auto-detect LoRA weights based on backbone ($BACKBONE) and data_id ($DATA_ID)"
+        MIXLORA_ARGS="--train_mixlora_only"
+        ;;
+    *)
+        # Treat as custom LoRA path
+        echo "🔒 MixLoRA-only training mode with custom LoRA path"
+        echo "Pretrained LoRA path: $TRAINING_MODE"
+
+        # Verify pretrained LoRA path exists
+        if [ ! -e "$TRAINING_MODE" ]; then
+            echo "Error: Pretrained LoRA path not found: $TRAINING_MODE"
+            exit 1
+        fi
+
+        MIXLORA_ARGS="--pretrained_lora_path \"$TRAINING_MODE\" --train_mixlora_only"
+        ;;
+esac
 
 # Check if base model exists
 if [ ! -d "$BASE_MODEL" ]; then
@@ -145,7 +194,8 @@ if [ "$GPU_CONFIG" = "single" ]; then
         --save_steps $SAVE_STEPS \
         --logging_steps $LOGGING_STEPS \
         --wandb_project "$WANDB_PROJECT" \
-        --run_name "$RUN_NAME"
+        --run_name "$RUN_NAME" \
+        $MIXLORA_ARGS
 else
     echo "Running multi-GPU training with torchrun (DDP instead of DataParallel)..."
     torchrun --nproc_per_node=2 --master_port=29500 custom_training/train_mixlora_custom.py \
@@ -174,7 +224,8 @@ else
         --save_steps $SAVE_STEPS \
         --logging_steps $LOGGING_STEPS \
         --wandb_project "$WANDB_PROJECT" \
-        --run_name "$RUN_NAME"
+        --run_name "$RUN_NAME" \
+        $MIXLORA_ARGS
 fi
 
 echo "Training completed!"
@@ -188,13 +239,24 @@ echo "Training completed!"
 
 echo ""
 echo "Usage examples:"
-echo "  ./run_custom_training.sh                    # Train with llama on culturalbench (dual-GPU)"
-echo "  ./run_custom_training.sh llama 2 2         # Train with llama on culturalbench (dual-GPU)"
-echo "  ./run_custom_training.sh llama 2 1         # Train with llama on culturalbench (single-GPU)"
-echo "  ./run_custom_training.sh qwen 2 2          # Train with qwen on culturalbench (dual-GPU)"
-echo "  ./run_custom_training.sh qwen 2 1          # Train with qwen on culturalbench (single-GPU)"
-echo "  ./run_custom_training.sh llama 3 2         # Train with llama on normad (dual-GPU)"
-echo "  ./run_custom_training.sh qwen 3 1          # Train with qwen on normad (single-GPU)"
+echo "  # Full model training:"
+echo "  ./run_custom_training.sh                         # Train with llama on culturalbench (dual-GPU, full mode)"
+echo "  ./run_custom_training.sh llama 2 2 full         # Train with llama on culturalbench (dual-GPU, full mode)"
+echo "  ./run_custom_training.sh llama 2 1 full         # Train with llama on culturalbench (single-GPU, full mode)"
+echo ""
+echo "  # MixLoRA-only training with auto LoRA path detection (memory efficient):"
+echo "  ./run_custom_training.sh llama 2 2 mixlora      # MixLoRA-only with auto LoRA path (dual-GPU)"
+echo "  ./run_custom_training.sh llama 2 1 mixlora      # MixLoRA-only with auto LoRA path (single-GPU)"
+echo "  ./run_custom_training.sh qwen 3 2 mixlora       # MixLoRA-only with qwen on normad (dual-GPU)"
+echo ""
+echo "  # MixLoRA-only training with custom LoRA path:"
+echo "  ./run_custom_training.sh llama 2 2 /path/to/pretrained_lora  # MixLoRA-only with custom path"
+echo ""
+echo "  # Other dataset examples:"
+echo "  ./run_custom_training.sh qwen 2 2 full          # Train with qwen on culturalbench (dual-GPU)"
+echo "  ./run_custom_training.sh llama 3 2 full         # Train with llama on normad (dual-GPU)"
+echo "  ./run_custom_training.sh llama 0 1 mixlora      # Train with llama on unified_small (single-GPU, MixLoRA-only)"
+echo "  ./run_custom_training.sh qwen 4 2 mixlora       # Train with qwen on cultureLLM (dual-GPU, MixLoRA-only)"
 echo ""
 echo "Check the output directory for:"
 echo "- best_model/: Best model adapter weights"

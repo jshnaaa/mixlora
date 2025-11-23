@@ -95,6 +95,11 @@ class CustomTrainingArguments:
     wandb_project: Optional[str] = field(default=None, metadata={"help": "Weights & Biases project name"})
     run_name: Optional[str] = field(default=None, metadata={"help": "Run name for logging"})
 
+    # Pretrained LoRA model loading
+    pretrained_lora_path: Optional[str] = field(default=None, metadata={"help": "Path to pretrained LoRA model to freeze"})
+    freeze_base_model: bool = field(default=False, metadata={"help": "Whether to freeze base model parameters"})
+    train_mixlora_only: bool = field(default=False, metadata={"help": "Only train MixLoRA components (router + experts)"})
+
 
 class BestModelTracker(TrainerCallback):
     """Callback to track and save the best model based on validation accuracy."""
@@ -202,13 +207,30 @@ class CustomMixLoRATrainer:
     def _get_dataset_config(self) -> Dict[str, str]:
         """Get dataset configuration based on data_id."""
         configs = {
+            0: {
+                "path": "/root/autodl-fs/unified_all_datasets_small_merge_gen.json",
+                "tag": "unified_small",
+                "name": "unified_all_datasets_small"
+            },
+            1: {
+                "path": "/root/autodl-fs/unified_all_datasets_merge_gen.json",
+                "tag": "unified",
+                "name": "unified_all_datasets"
+            },
             2: {
                 "path": "/root/autodl-fs/CulturalBench_merge_gen.json",
-                "tag": "culturalbench"
+                "tag": "CulturalBench",
+                "name": "CulturalBench"
             },
             3: {
                 "path": "/root/autodl-fs/normad_merge_gen.json",
-                "tag": "normad"
+                "tag": "normad",
+                "name": "NormAD"
+            },
+            4: {
+                "path": "/root/autodl-fs/cultureLLM_merge_gen.json",
+                "tag": "cultureLLM",
+                "name": "CultureLLM"
             }
         }
 
@@ -216,6 +238,52 @@ class CustomMixLoRATrainer:
             raise ValueError(f"Unsupported data_id: {self.args.data_id}. Supported values: {list(configs.keys())}")
 
         return configs[self.args.data_id]
+
+    def _get_lora_weights_path(self) -> Optional[str]:
+        """Get LoRA weights path based on backbone and data_id."""
+        dataset_config = self._get_dataset_config()
+        dataset_name = dataset_config["name"]
+
+        # LoRA weights path mapping
+        lora_paths = {
+            # unified_all_datasets_small
+            (0, "qwen"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_qwen_*/best_lora",
+            (0, "llama"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_llama_*/best_lora",
+
+            # unified_all_datasets
+            (1, "qwen"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_qwen_*/best_lora",
+            (1, "llama"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_unified_llama_*/best_lora",
+
+            # CulturalBench
+            (2, "qwen"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_qwen_20251112_1228/best_lora",
+            (2, "llama"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_CulturalBench_llama_20251112_1141/best_lora",
+
+            # NormAD
+            (3, "qwen"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_qwen_20251111_1204/best_lora",
+            (3, "llama"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_normad_llama_20251112_1335/best_lora",
+
+            # CultureLLM
+            (4, "qwen"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_qwen_*/best_lora",
+            (4, "llama"): "/root/autodl-tmp/CultureMoE/Culture_Alignment/ft/ft_lora_only_gen_cultureLLM_llama_*/best_lora",
+        }
+
+        path_pattern = lora_paths.get((self.args.data_id, self.args.backbone))
+        if not path_pattern:
+            return None
+
+        # Handle wildcard paths
+        if "*" in path_pattern:
+            import glob
+            matching_paths = glob.glob(path_pattern)
+            if matching_paths:
+                # Use the most recent one (last in sorted order)
+                path_pattern = sorted(matching_paths)[-1]
+                self.logger.info(f"Found LoRA weights (wildcard): {path_pattern}")
+            else:
+                self.logger.warning(f"No matching LoRA weights found for pattern: {path_pattern}")
+                return None
+
+        return path_pattern
 
     def _get_default_target_modules(self, model_type: str) -> List[str]:
         """Get default target modules based on model type."""
@@ -382,6 +450,24 @@ class CustomMixLoRATrainer:
         # Update device reference for consistency
         self.device = model_device
 
+        # Auto-determine pretrained LoRA path for MixLoRA-only training if not specified
+        if self.args.train_mixlora_only and not self.args.pretrained_lora_path:
+            auto_lora_path = self._get_lora_weights_path()
+            if auto_lora_path:
+                self.args.pretrained_lora_path = auto_lora_path
+                self.logger.info(f"Auto-determined LoRA weights path: {auto_lora_path}")
+            else:
+                self.logger.warning(f"Could not auto-determine LoRA weights path for data_id={self.args.data_id}, backbone={self.args.backbone}")
+                self.logger.warning("Proceeding with MixLoRA-only training without pretrained LoRA weights")
+
+        # Load pretrained LoRA weights if specified or auto-determined
+        if self.args.pretrained_lora_path:
+            self._load_pretrained_lora()
+
+        # Freeze parameters if requested
+        if self.args.freeze_base_model or self.args.train_mixlora_only:
+            self._freeze_parameters()
+
         # Verify all components are on the correct device
         self._verify_device_consistency()
         self.logger.info(f"MixLoRA adapters injected successfully, model on device: {next(self.model.parameters()).device}")
@@ -502,6 +588,106 @@ class CustomMixLoRATrainer:
                     continue
 
         return weights
+
+    def _load_pretrained_lora(self):
+        """Load pretrained LoRA weights into the model."""
+        self.logger.info(f"Loading pretrained LoRA weights from: {self.args.pretrained_lora_path}")
+
+        try:
+            # Try to load as a complete model state dict
+            if os.path.isfile(self.args.pretrained_lora_path):
+                pretrained_weights = torch.load(self.args.pretrained_lora_path, map_location=self.device)
+            elif os.path.isdir(self.args.pretrained_lora_path):
+                # Try to load from directory (adapter_model.bin or pytorch_model.bin)
+                possible_files = ["adapter_model.bin", "pytorch_model.bin", "model.bin"]
+                pretrained_weights = None
+                for file_name in possible_files:
+                    file_path = os.path.join(self.args.pretrained_lora_path, file_name)
+                    if os.path.exists(file_path):
+                        pretrained_weights = torch.load(file_path, map_location=self.device)
+                        self.logger.info(f"Loaded weights from: {file_path}")
+                        break
+
+                if pretrained_weights is None:
+                    raise FileNotFoundError(f"No valid weight file found in {self.args.pretrained_lora_path}")
+            else:
+                raise FileNotFoundError(f"Pretrained LoRA path not found: {self.args.pretrained_lora_path}")
+
+            # Load the weights into the model
+            missing_keys, unexpected_keys = self.model.load_state_dict(pretrained_weights, strict=False)
+
+            if missing_keys:
+                self.logger.warning(f"Missing keys when loading pretrained LoRA: {len(missing_keys)} keys")
+                # Log first few missing keys for debugging
+                for key in missing_keys[:5]:
+                    self.logger.warning(f"  Missing: {key}")
+                if len(missing_keys) > 5:
+                    self.logger.warning(f"  ... and {len(missing_keys) - 5} more")
+
+            if unexpected_keys:
+                self.logger.info(f"Unexpected keys when loading pretrained LoRA: {len(unexpected_keys)} keys")
+
+            self.logger.info("✅ Successfully loaded pretrained LoRA weights")
+
+        except Exception as e:
+            self.logger.error(f"Failed to load pretrained LoRA weights: {e}")
+            raise
+
+    def _freeze_parameters(self):
+        """Freeze specified parameters based on training mode."""
+        frozen_count = 0
+        trainable_count = 0
+
+        if self.args.train_mixlora_only:
+            self.logger.info("🔒 MIXLORA-ONLY MODE: Freezing all parameters except MixLoRA components")
+
+            # Freeze ALL parameters first
+            for param in self.model.parameters():
+                param.requires_grad = False
+                frozen_count += 1
+
+            # Then unfreeze only MixLoRA components
+            for name, param in self.model.named_parameters():
+                # Unfreeze MixLoRA router and expert parameters
+                if any(component in name for component in ['moe_gate', 'experts', 'mixlora']):
+                    param.requires_grad = True
+                    frozen_count -= 1
+                    trainable_count += 1
+
+        elif self.args.freeze_base_model:
+            self.logger.info("🔒 Freezing base model parameters, keeping LoRA trainable")
+
+            for name, param in self.model.named_parameters():
+                # Freeze base model parameters, keep LoRA parameters trainable
+                if not any(component in name for component in ['lora_A', 'lora_B', 'moe_gate', 'experts', 'mixlora']):
+                    param.requires_grad = False
+                    frozen_count += 1
+                else:
+                    trainable_count += 1
+
+        self.logger.info(f"📊 Parameter status: {trainable_count} trainable, {frozen_count} frozen")
+
+        # Log trainable parameters for verification
+        trainable_params = []
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                trainable_params.append(name)
+
+        if trainable_params:
+            self.logger.info("🎯 Trainable parameters:")
+            for param_name in trainable_params[:10]:  # Show first 10
+                self.logger.info(f"  ✓ {param_name}")
+            if len(trainable_params) > 10:
+                self.logger.info(f"  ... and {len(trainable_params) - 10} more")
+
+        # Calculate memory savings
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params_count = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        frozen_params_count = total_params - trainable_params_count
+
+        self.logger.info(f"💾 Memory savings: {frozen_params_count:,} / {total_params:,} parameters frozen ({frozen_params_count/total_params*100:.1f}%)")
+
+        return trainable_count, frozen_count
 
     def _verify_device_consistency(self):
         """Verify that ALL model components are on the SAME device."""
@@ -1026,6 +1212,11 @@ def main():
     # Experiment tracking
     parser.add_argument("--wandb_project", type=str, help="Weights & Biases project name")
     parser.add_argument("--run_name", type=str, help="Run name for logging")
+
+    # Pretrained LoRA model options
+    parser.add_argument("--pretrained_lora_path", type=str, help="Path to pretrained LoRA model to load and freeze")
+    parser.add_argument("--freeze_base_model", action="store_true", help="Freeze base model parameters")
+    parser.add_argument("--train_mixlora_only", action="store_true", help="Only train MixLoRA components (router + experts)")
 
     args = parser.parse_args()
 
