@@ -24,6 +24,23 @@ case $BACKBONE in
         ;;
 esac
 
+# Dataset configuration
+case $DATA_ID in
+    2)
+        DATASET_TAG="culturalbench"
+        ;;
+    3)
+        DATASET_TAG="normad"
+        ;;
+    *)
+        echo "Error: Unsupported data_id '$DATA_ID'. Supported values: 2, 3"
+        exit 1
+        ;;
+esac
+
+# Define output directory
+OUTPUT_DIR="/root/autodl-fs/data/mixlora/${DATASET_TAG}_${BACKBONE}_$(date +%Y%m%d_%H%M)"
+
 # MixLoRA parameters
 NUM_EXPERTS=8
 TOP_K=2
@@ -57,8 +74,9 @@ RUN_NAME="mixlora-data${DATA_ID}-$(date +%Y%m%d_%H%M%S)"
 
 echo "Starting MixLoRA training on cultural dataset..."
 echo "Backbone: $BACKBONE"
-echo "Dataset ID: $DATA_ID"
+echo "Dataset ID: $DATA_ID ($DATASET_TAG)"
 echo "Base model: $BASE_MODEL"
+echo "Output directory: $OUTPUT_DIR"
 echo "Run name: $RUN_NAME"
 
 # Check if base model exists
@@ -73,6 +91,7 @@ python custom_training/train_mixlora_custom.py \
     --data_id $DATA_ID \
     --backbone "$BACKBONE" \
     --base_model "$BASE_MODEL" \
+    --output_dir "$OUTPUT_DIR" \
     --num_experts $NUM_EXPERTS \
     --top_k $TOP_K \
     --routing_strategy "$ROUTING_STRATEGY" \

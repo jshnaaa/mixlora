@@ -118,6 +118,9 @@ class CustomMixLoRAInference:
         hidden_size = self.model.config.hidden_size
         num_layers = self.model.config.num_hidden_layers
 
+        # Get actual layer for dimension inspection
+        sample_layer = self.model.model.layers[0]
+
         for layer_idx in range(num_layers):
             # Router gate weights
             weights[f"mixlora.layers.{layer_idx}.mlp.moe_gate.weight"] = torch.randn(
@@ -129,26 +132,35 @@ class CustomMixLoRAInference:
                 if not is_target:
                     continue
 
-                # Get dimensions based on module type
+                # Get actual dimensions from the model layer
                 try:
-                    if module_name in ["gate_proj", "up_proj"]:
-                        in_features = hidden_size
-                        out_features = self.model.config.intermediate_size
-                    elif module_name == "down_proj":
-                        in_features = self.model.config.intermediate_size
-                        out_features = hidden_size
-                    elif module_name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
-                        in_features = hidden_size
-                        out_features = hidden_size
-                    elif module_name == "fc1":
-                        in_features = hidden_size
-                        out_features = self.model.config.intermediate_size
-                    elif module_name == "fc2":
-                        in_features = self.model.config.intermediate_size
-                        out_features = hidden_size
+                    if hasattr(sample_layer.mlp, module_name):
+                        actual_layer = getattr(sample_layer.mlp, module_name)
+                        if hasattr(actual_layer, 'weight'):
+                            out_features, in_features = actual_layer.weight.shape
+                        elif hasattr(actual_layer, 'in_features') and hasattr(actual_layer, 'out_features'):
+                            in_features = actual_layer.in_features
+                            out_features = actual_layer.out_features
+                        else:
+                            # Fallback based on module type
+                            if module_name in ["gate_proj", "up_proj"]:
+                                in_features = hidden_size
+                                out_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                            elif module_name == "down_proj":
+                                in_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                                out_features = hidden_size
+                            elif module_name == "fc1":
+                                in_features = hidden_size
+                                out_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                            elif module_name == "fc2":
+                                in_features = getattr(self.model.config, 'intermediate_size', hidden_size * 4)
+                                out_features = hidden_size
+                            else:
+                                in_features = hidden_size
+                                out_features = hidden_size
                     else:
-                        in_features = hidden_size
-                        out_features = hidden_size
+                        # Module doesn't exist, skip
+                        continue
 
                     # Create LoRA weights for each expert
                     for expert_idx in range(self.mixlora_config.num_experts_):
@@ -170,20 +182,41 @@ class CustomMixLoRAInference:
 
             # Attention LoRA weights
             for module_name, is_target in self.mixlora_config.target_modules_.items():
-                if not is_target or module_name in ["gate_proj", "up_proj", "down_proj", "fc1", "fc2"]:
+                if not is_target or module_name in ["gate_proj", "up_proj", "down_proj", "fc1", "fc2", "gate_up_proj"]:
                     continue
 
                 prefix = f"mixlora.layers.{layer_idx}.self_attn.{module_name}"
 
-                # LoRA A matrix
-                weights[f"{prefix}.lora_A.weight"] = torch.randn(
-                    self.mixlora_config.lora_r_, hidden_size, dtype=torch.float16
-                ) * 0.01
+                # Get actual dimensions from the model layer
+                try:
+                    if hasattr(sample_layer.self_attn, module_name):
+                        actual_layer = getattr(sample_layer.self_attn, module_name)
+                        if hasattr(actual_layer, 'weight'):
+                            out_features, in_features = actual_layer.weight.shape
+                        elif hasattr(actual_layer, 'in_features') and hasattr(actual_layer, 'out_features'):
+                            in_features = actual_layer.in_features
+                            out_features = actual_layer.out_features
+                        else:
+                            # Fallback to config values
+                            in_features = hidden_size
+                            out_features = hidden_size
+                    else:
+                        # Module doesn't exist, skip
+                        continue
 
-                # LoRA B matrix
-                weights[f"{prefix}.lora_B.weight"] = torch.zeros(
-                    hidden_size, self.mixlora_config.lora_r_, dtype=torch.float16
-                )
+                    # LoRA A matrix (in_features -> rank)
+                    weights[f"{prefix}.lora_A.weight"] = torch.randn(
+                        self.mixlora_config.lora_r_, in_features, dtype=torch.float16
+                    ) * 0.01
+
+                    # LoRA B matrix (rank -> out_features)
+                    weights[f"{prefix}.lora_B.weight"] = torch.zeros(
+                        out_features, self.mixlora_config.lora_r_, dtype=torch.float16
+                    )
+
+                except Exception as e:
+                    self.logger.warning(f"Could not determine dimensions for attention module {module_name}: {e}")
+                    continue
 
         return weights
 

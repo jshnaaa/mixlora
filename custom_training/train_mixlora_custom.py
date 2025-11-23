@@ -47,6 +47,7 @@ class CustomTrainingArguments:
     backbone: str = field(default="llama", metadata={"help": "Model backbone (llama, qwen)"})
     base_model: str = field(default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
                            metadata={"help": "Base model path"})
+    output_dir: str = field(default="./mixlora_output", metadata={"help": "Output directory"})
 
     # MixLoRA parameters
     num_experts: int = field(default=8, metadata={"help": "Number of experts"})
@@ -141,8 +142,8 @@ class CustomMixLoRATrainer:
         # Get dataset configuration
         self.dataset_config = self._get_dataset_config()
 
-        # Set up output directory
-        self.output_dir = f"/root/autodl-fs/data/mixlora/{self.dataset_config['tag']}_{self.args.backbone}_{datetime.now().strftime('%Y%m%d_%H%M')}"
+        # Set up output directory (use the one passed from shell script)
+        self.output_dir = self.args.output_dir
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.logger.info(f"Output directory: {self.output_dir}")
@@ -617,6 +618,7 @@ def main():
     parser.add_argument("--base_model", type=str,
                        default="/root/autodl-tmp/CultureMoE/Culture_Alignment/Meta-Llama-3.1-8B-Instruct",
                        help="Base model path")
+    parser.add_argument("--output_dir", type=str, default="./mixlora_output", help="Output directory")
 
     # MixLoRA parameters
     parser.add_argument("--num_experts", type=int, default=8, help="Number of experts")
