@@ -191,7 +191,6 @@ class CustomMixLoRATrainer:
                 print("Note: Using BF16/FP32 precision to avoid gradient scaling issues")
 
                 # Additional check: ensure torch sees only 1 GPU
-                import torch
                 torch.cuda.empty_cache()  # Clear cache
                 print(f"After setting CUDA_VISIBLE_DEVICES=0, torch sees {torch.cuda.device_count()} GPU(s)")
 

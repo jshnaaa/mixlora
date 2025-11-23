@@ -10,7 +10,7 @@
 # Parse command line arguments
 BACKBONE=${1:-"llama"}  # Default to llama
 DATA_ID=${2:-2}         # Default to culturalbench
-NUM_GPU=${3:-2}         # Default to dual-GPU
+NUM_GPU=${3:-1}         # Default to dual-GPU
 
 # Model configuration based on backbone
 case $BACKBONE in
