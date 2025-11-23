@@ -17,19 +17,13 @@ from datetime import datetime
 # Set memory optimization environment variables first
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# Enable dual-GPU training for large memory GPUs (48G+)
+# Use single GPU training for stability with large batch size for 48G GPU
 # Users can override this by setting CUDA_VISIBLE_DEVICES before running
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
-    import torch
-    if torch.cuda.is_available():
-        gpu_count = torch.cuda.device_count()
-        if gpu_count >= 2:
-            # Use first two GPUs for training
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
-            print(f"Using dual-GPU for training: {os.environ['CUDA_VISIBLE_DEVICES']}")
-        else:
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-            print(f"Using single GPU for training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+    # Use only the first GPU but with larger batch size for 48G memory
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    print(f"Using single GPU for training: {os.environ['CUDA_VISIBLE_DEVICES']}")
+    print("Note: Using single GPU with optimized batch size for 48G memory")
 
 import torch
 import torch.nn as nn
@@ -204,31 +198,15 @@ class CustomMixLoRATrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load base model with smart GPU allocation
-        gpu_count = torch.cuda.device_count()
-        self.logger.info(f"Available GPUs: {gpu_count}")
-
-        if gpu_count >= 2:
-            # Dual-GPU setup: load on CPU first, then move to primary GPU
-            self.logger.info("Using dual-GPU setup with DDP")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.args.base_model,
-                torch_dtype=torch.float16,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,
-                device_map=None  # Load on CPU first
-            )
-            self.model_dtype = torch.float16
-        else:
-            # Single GPU setup
-            self.logger.info(f"Using single GPU: {self.device}")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.args.base_model,
-                torch_dtype=torch.float16,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True
-            )
-            self.model_dtype = torch.float16
+        # Load base model for single GPU training with large batch size
+        self.logger.info(f"Loading model for single GPU training on: {self.device}")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.args.base_model,
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
+        )
+        self.model_dtype = torch.float16
 
         self.logger.info(f"Model loaded successfully with dtype: {self.model_dtype}")
 
@@ -291,11 +269,11 @@ class CustomMixLoRATrainer:
         # Inject MixLoRA adapters
         inject_adapter_in_model(self.model, self.mixlora_config, dummy_weights)
 
-        # Ensure model and all adapters are properly placed
-        # Always move everything to self.device for consistency
+        # Ensure model and all adapters are properly placed on primary GPU
+        # The Trainer will handle multi-GPU distribution automatically
         self.model = self.model.to(self.device)
 
-        # Also ensure all MixLoRA components are on the correct device
+        # Also ensure all MixLoRA components are on the primary device
         for layer in self.model.model.layers:
             if hasattr(layer.mlp, 'mixlora_moes'):
                 for moe_name, moe_layer in layer.mlp.mixlora_moes.items():
@@ -308,6 +286,8 @@ class CustomMixLoRATrainer:
             if hasattr(layer.self_attn, 'mixlora_loras'):
                 for lora_name, lora_layer in layer.self_attn.mixlora_loras.items():
                     lora_layer.to(self.device)
+
+        # Note: Do NOT manually wrap with DataParallel - let Trainer handle it
 
         # Verify all components are on the correct device
         self._verify_device_consistency()
@@ -640,25 +620,20 @@ class CustomMixLoRATrainer:
         total_steps = len(self.train_dataset) // (self.args.batch_size * self.args.gradient_accumulation_steps) * self.args.num_epochs
         eval_steps = max(1, total_steps // (self.args.num_epochs // self.args.eval_interval)) if self.args.eval_interval > 0 else total_steps
 
-        # Check precision support and GPU setup
-        gpu_count = torch.cuda.device_count()
+        # Check precision support for single GPU training
         bf16_available = torch.cuda.is_bf16_supported()
         self.logger.info(f"BF16 support: {bf16_available}")
 
-        # Use FP16 for memory efficiency on both single and dual GPU
-        if gpu_count >= 2:
-            self.logger.info(f"Using FP16 precision for dual-GPU training ({gpu_count} GPUs)")
-        else:
-            self.logger.info("Using FP16 precision for single GPU training")
-
+        # Use FP16 for memory efficiency
+        self.logger.info("Using FP16 precision for single GPU training")
         use_fp16 = True
         use_bf16 = False
 
-        # Use the specified batch size per device
+        # Calculate effective batch size
         per_device_batch_size = self.args.batch_size
-        total_batch_size = per_device_batch_size * max(1, gpu_count) * self.args.gradient_accumulation_steps
+        total_batch_size = per_device_batch_size * self.args.gradient_accumulation_steps
         self.logger.info(f"Batch size per device: {per_device_batch_size}")
-        self.logger.info(f"Total effective batch size: {total_batch_size} (GPUs: {gpu_count})")
+        self.logger.info(f"Total effective batch size: {total_batch_size}")
 
         # Setup training arguments
         training_args = TrainingArguments(
@@ -688,21 +663,18 @@ class CustomMixLoRATrainer:
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             report_to=None,  # Disable wandb for now
-            # Multi-GPU settings
+            # Single GPU settings
             dataloader_num_workers=0,  # Avoid multiprocessing issues
             dataloader_drop_last=True,  # Ensure even batch distribution
-            # DDP settings for dual-GPU training
-            ddp_find_unused_parameters=False,  # Set to False for better performance
-            ddp_timeout=1800,  # 30 minutes timeout for large models
         )
 
-        # Create trainer
+        # Create trainer - use original collator, avoid DataParallel issues
         trainer = Trainer(
             model=self.model,
             args=training_args,
             train_dataset=self.train_dataset,
             eval_dataset=self.val_dataset,
-            data_collator=self.data_collator,
+            data_collator=self.data_collator,  # Use original collator
             tokenizer=self.tokenizer,
             compute_metrics=self.compute_metrics,
         )

@@ -54,10 +54,10 @@ LORA_R=8
 LORA_ALPHA=16
 LORA_DROPOUT=0.05
 
-# Training parameters (optimized for 48G dual-GPU setup)
+# Training parameters (optimized for 48G single-GPU setup)
 MAX_LENGTH=512
-BATCH_SIZE=8  # Per device batch size for 48G GPU
-GRADIENT_ACCUMULATION_STEPS=4  # Total effective batch size = 8 * 2 * 4 = 64
+BATCH_SIZE=16  # Large batch size for 48G GPU memory
+GRADIENT_ACCUMULATION_STEPS=4  # Total effective batch size = 16 * 4 = 64
 LEARNING_RATE=1e-4
 NUM_EPOCHS=3
 WARMUP_RATIO=0.1
