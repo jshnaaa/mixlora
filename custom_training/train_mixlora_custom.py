@@ -102,38 +102,42 @@ class BestModelTracker(TrainerCallback):
 
     def on_evaluate(self, args, state, control, model, eval_dataloader, **kwargs):
         """Called after evaluation."""
-        if hasattr(state, 'log_history') and len(state.log_history) > 0:
-            last_log = state.log_history[-1]
-            if 'eval_accuracy' in last_log:
-                current_accuracy = last_log['eval_accuracy']
+        # Since we use safe_collator, we need to do our own evaluation with choice_answers
+        logging.info("Performing custom evaluation with choice answer extraction...")
 
-                # Save evaluation result
-                eval_result = {
-                    'epoch': state.epoch,
-                    'step': state.global_step,
-                    'eval_accuracy': current_accuracy,
-                    'eval_loss': last_log.get('eval_loss', 0.0)
-                }
-                self.eval_results.append(eval_result)
+        # Get validation metrics using the trainer's evaluate_on_dataset method
+        val_metrics, val_results = self.trainer_instance.evaluate_on_dataset(
+            self.trainer_instance.val_dataset, "Validation"
+        )
+        current_accuracy = val_metrics['accuracy']
 
-                # Check if this is the best model so far
-                if current_accuracy > self.best_accuracy:
-                    self.best_accuracy = current_accuracy
+        # Save evaluation result
+        eval_result = {
+            'epoch': state.epoch,
+            'step': state.global_step,
+            'eval_accuracy': current_accuracy,
+            'eval_loss': 0.0  # We don't track loss in our custom evaluation
+        }
+        self.eval_results.append(eval_result)
 
-                    # Save the best model (only adapter weights)
-                    best_model_dir = os.path.join(args.output_dir, "best_model")
-                    os.makedirs(best_model_dir, exist_ok=True)
+        # Check if this is the best model so far
+        if current_accuracy > self.best_accuracy:
+            self.best_accuracy = current_accuracy
 
-                    # Save adapter weights
-                    self.trainer_instance.save_adapter_weights(best_model_dir)
-                    self.best_model_path = best_model_dir
+            # Save the best model (only adapter weights)
+            best_model_dir = os.path.join(args.output_dir, "best_model")
+            os.makedirs(best_model_dir, exist_ok=True)
 
-                    logging.info(f"New best model saved with accuracy: {current_accuracy:.4f}")
+            # Save adapter weights
+            self.trainer_instance.save_adapter_weights(best_model_dir)
+            self.best_model_path = best_model_dir
 
-                # Save evaluation results
-                eval_results_path = os.path.join(args.output_dir, "validation_results.json")
-                with open(eval_results_path, 'w') as f:
-                    json.dump(self.eval_results, f, indent=2)
+            logging.info(f"New best model saved with accuracy: {current_accuracy:.4f}")
+
+        # Save evaluation results
+        eval_results_path = os.path.join(args.output_dir, "validation_results.json")
+        with open(eval_results_path, 'w') as f:
+            json.dump(self.eval_results, f, indent=2)
 
 
 class CustomMixLoRATrainer:
@@ -516,6 +520,28 @@ class CustomMixLoRATrainer:
         # Setup data collator
         self.data_collator = ChoiceQuestionCollator(tokenizer=self.tokenizer)
 
+        # Create a safe collator that removes non-tensor data for DataParallel compatibility
+        self.safe_collator = self._create_safe_collator()
+
+    def _create_safe_collator(self):
+        """Create a collator that only returns tensor data safe for DataParallel."""
+        original_collator = self.data_collator
+
+        def safe_collator(features):
+            # Process with original collator
+            batch = original_collator(features)
+
+            # Only return tensor data - remove choice_answers which causes DataParallel issues
+            safe_batch = {
+                'input_ids': batch['input_ids'],
+                'attention_mask': batch['attention_mask'],
+                'labels': batch['labels']
+            }
+
+            return safe_batch
+
+        return safe_collator
+
     def save_adapter_weights(self, save_path: str):
         """Save only the adapter weights (not the full model)."""
         os.makedirs(save_path, exist_ok=True)
@@ -564,7 +590,7 @@ class CustomMixLoRATrainer:
             dataset,
             batch_size=self.args.batch_size,
             shuffle=False,
-            collate_fn=self.data_collator
+            collate_fn=self.data_collator  # Use original collator for evaluation
         )
 
         all_predictions = []
@@ -655,10 +681,9 @@ class CustomMixLoRATrainer:
         """Compute metrics for the trainer."""
         predictions, labels = eval_pred
 
-        # This is a simplified version - the main evaluation happens in evaluate_on_dataset
-        # We'll use this just to get basic accuracy for the trainer callback
-
-        # For now, return a dummy accuracy that will be overridden
+        # Since we use safe_collator, we don't have access to choice_answers here
+        # The real evaluation with choice_answers happens in BestModelTracker
+        # Return dummy metrics for trainer compatibility
         return {"accuracy": 0.0}
 
     def train(self):
@@ -733,13 +758,13 @@ class CustomMixLoRATrainer:
             ddp_timeout=1800,  # 30 minutes timeout for large models
         )
 
-        # Create trainer - use original collator, avoid DataParallel issues
+        # Create trainer - use safe collator for DataParallel compatibility
         trainer = Trainer(
             model=self.model,
             args=training_args,
             train_dataset=self.train_dataset,
             eval_dataset=self.val_dataset,
-            data_collator=self.data_collator,  # Use original collator
+            data_collator=self.safe_collator,  # Use safe collator (tensor-only)
             tokenizer=self.tokenizer,
             compute_metrics=self.compute_metrics,
         )
