@@ -20,11 +20,43 @@ class MoEConfig(MixLoraConfig):
         # Extract shared expert specific parameters
         self.use_shared_expert = kwargs.pop('use_shared_expert', True)
 
+        # Map standard parameter names to internal names
+        if 'base_model_name_or_path' in kwargs:
+            kwargs['base_model_'] = kwargs.pop('base_model_name_or_path')
+        if 'task_type' in kwargs:
+            kwargs['task_type_'] = kwargs.pop('task_type')
+        if 'r' in kwargs:
+            kwargs['lora_r_'] = kwargs.pop('r')
+        if 'lora_alpha' in kwargs:
+            kwargs['lora_alpha_'] = kwargs.pop('lora_alpha')
+        if 'lora_dropout' in kwargs:
+            kwargs['lora_dropout_'] = kwargs.pop('lora_dropout')
+        if 'target_modules' in kwargs:
+            kwargs['target_modules_'] = kwargs.pop('target_modules')
+        if 'use_dora' in kwargs:
+            kwargs['use_dora_'] = kwargs.pop('use_dora')
+        if 'use_rslora' in kwargs:
+            kwargs['use_rslora_'] = kwargs.pop('use_rslora')
+        if 'routing_strategy' in kwargs:
+            kwargs['routing_strategy_'] = kwargs.pop('routing_strategy')
+        if 'num_experts' in kwargs:
+            kwargs['num_experts_'] = kwargs.pop('num_experts')
+        if 'top_k' in kwargs:
+            kwargs['top_k_'] = kwargs.pop('top_k')
+        if 'router_aux_loss_coef' in kwargs:
+            kwargs['router_aux_loss_coef_'] = kwargs.pop('router_aux_loss_coef')
+        if 'router_init_range' in kwargs:
+            kwargs['router_init_range_'] = kwargs.pop('router_init_range')
+        if 'jitter_noise' in kwargs:
+            kwargs['jitter_noise_'] = kwargs.pop('jitter_noise')
+        if 'act_fn' in kwargs:
+            kwargs['act_fn_'] = kwargs.pop('act_fn')
+
         # Initialize parent MixLoRA config
         super().__init__(*args, **kwargs)
 
         # Set MoE specific attributes
-        self.peft_type = "MOE"
+        self.peft_type_ = "MOE"
 
     @classmethod
     def from_config(cls, config_dict):
@@ -32,33 +64,25 @@ class MoEConfig(MixLoraConfig):
         # Extract shared expert parameter
         use_shared_expert = config_dict.get('use_shared_expert', True)
 
-        # Create base MixLoRA config
-        base_config = super().from_config(config_dict)
-
-        # Create MoE config with shared expert parameter
+        # Create MoE config directly with proper parameter mapping
         moe_config = cls(
-            base_model_name_or_path=base_config.base_model_name_or_path,
-            task_type=base_config.task_type,
-            peft_type="MOE",
-            r=base_config.lora_r_,
-            lora_alpha=base_config.lora_alpha_,
-            lora_dropout=base_config.lora_dropout_,
-            target_modules=base_config.target_modules_,
-            use_dora=base_config.use_dora_,
-            use_rslora=base_config.use_rslora_,
-            routing_strategy=base_config.routing_strategy_,
-            num_experts=base_config.num_experts_,
-            top_k=base_config.top_k_,
-            router_aux_loss_coef=base_config.router_aux_loss_coef_,
-            router_init_range=base_config.router_init_range_,
-            jitter_noise=base_config.jitter_noise_,
-            act_fn=base_config.act_fn_,
+            base_model_name_or_path=config_dict.get('base_model_name_or_path', ''),
+            task_type=config_dict.get('task_type', 'CAUSAL_LM'),
+            r=config_dict.get('lora_r', 8),
+            lora_alpha=config_dict.get('lora_alpha', 16),
+            lora_dropout=config_dict.get('lora_dropout', 0.05),
+            target_modules=config_dict.get('target_modules', {}),
+            use_dora=config_dict.get('use_dora', False),
+            use_rslora=config_dict.get('use_rslora', False),
+            routing_strategy=config_dict.get('routing_strategy', 'mixlora'),
+            num_experts=config_dict.get('num_experts', 8),
+            top_k=config_dict.get('top_k', 2),
+            router_aux_loss_coef=config_dict.get('router_aux_loss_coef', 0.01),
+            router_init_range=config_dict.get('router_init_range', 0.02),
+            jitter_noise=config_dict.get('jitter_noise', 0.0),
+            act_fn=config_dict.get('act_fn', None),
             use_shared_expert=use_shared_expert
         )
-
-        # Copy other attributes
-        if hasattr(base_config, 'dtype_'):
-            moe_config.dtype_ = base_config.dtype_
 
         return moe_config
 

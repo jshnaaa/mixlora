@@ -24,29 +24,46 @@ class SharedExpert(nn.Module):
     """
     Shared expert that is always activated (not routed).
     Has the same structure as routed experts but with weight=1.
+    Uses LoRA structure for consistency with routed experts.
     """
 
-    def __init__(self, config: MoEConfig, in_features: int, out_features: int, device=None, dtype=None):
+    def __init__(self, config: MoEConfig, base_layer: nn.Linear, device=None, dtype=None):
         super().__init__()
         self.config = config
-        self.in_features = in_features
-        self.out_features = out_features
+        self.base_layer = base_layer
 
         # Create LoRA layers for shared expert (same structure as routed experts)
-        self.lora_A = nn.Linear(in_features, config.lora_r_, bias=False, device=device, dtype=dtype)
-        self.lora_B = nn.Linear(config.lora_r_, out_features, bias=False, device=device, dtype=dtype)
+        self.lora_A = nn.Linear(
+            base_layer.in_features,
+            config.lora_r_,
+            bias=False,
+            device=device,
+            dtype=dtype
+        )
+        self.lora_B = nn.Linear(
+            config.lora_r_,
+            base_layer.out_features,
+            bias=False,
+            device=device,
+            dtype=dtype
+        )
 
         # Initialize weights same as routed experts
         nn.init.normal_(self.lora_A.weight, std=0.01)
         nn.init.zeros_(self.lora_B.weight)
 
         self.scaling = config.lora_alpha_ / config.lora_r_
+        self.dropout = nn.Dropout(config.lora_dropout_)
 
-    def forward(self, x):
+    def forward(self, x, base_output=None):
         """Forward pass through shared expert."""
-        # LoRA forward: x + scaling * B(A(x))
-        lora_output = self.lora_B(self.lora_A(x))
-        return x + self.scaling * lora_output
+        # If base_output is provided, use it; otherwise compute it
+        if base_output is None:
+            base_output = self.base_layer(x)
+
+        # LoRA forward: base_output + scaling * B(A(x))
+        lora_output = self.lora_B(self.lora_A(self.dropout(x)))
+        return base_output + self.scaling * lora_output
 
 
 class MoEWithSharedExpert(MixLoraSparseMoe):
@@ -74,8 +91,7 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
                         base_proj = getattr(base_layer, proj_name)
                         self.shared_experts[proj_name] = SharedExpert(
                             config,
-                            base_proj.in_features,
-                            base_proj.out_features,
+                            base_proj,
                             device=base_proj.weight.device,
                             dtype=base_proj.weight.dtype
                         )
@@ -86,8 +102,7 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
                         base_proj = getattr(base_layer, proj_name)
                         self.shared_experts[proj_name] = SharedExpert(
                             config,
-                            base_proj.in_features,
-                            base_proj.out_features,
+                            base_proj,
                             device=base_proj.weight.device,
                             dtype=base_proj.weight.dtype
                         )
@@ -98,8 +113,7 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
                         base_proj = getattr(base_layer, proj_name)
                         self.shared_experts[proj_name] = SharedExpert(
                             config,
-                            base_proj.in_features,
-                            base_proj.out_features,
+                            base_proj,
                             device=base_proj.weight.device,
                             dtype=base_proj.weight.dtype
                         )
@@ -151,11 +165,11 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
             shared_down = self.shared_experts.get('down_proj', None)
 
             if shared_gate is not None and shared_up is not None and shared_down is not None:
-                # Shared expert forward: same structure as routed experts
-                gate_output = shared_gate.forward(hidden_states)
-                up_output = shared_up.forward(hidden_states)
+                # Shared expert forward: reuse base layer computations
+                gate_output = shared_gate.forward(hidden_states, common_gate)
+                up_output = shared_up.forward(hidden_states, common_up)
                 act_result = self.act_fn_(gate_output) * up_output
-                shared_output = shared_down.forward(act_result)
+                shared_output = shared_down.forward(act_result, self.base_layer_.down_proj(act_result))
 
                 # Weighted normalization: consider routing weights
                 # Sum of routing weights for normalization
@@ -212,9 +226,9 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
             shared_fc2 = self.shared_experts.get('fc2', None)
 
             if shared_fc1 is not None and shared_fc2 is not None:
-                fc1_output = shared_fc1.forward(hidden_states)
+                fc1_output = shared_fc1.forward(hidden_states, common_fc1)
                 act_result = self.act_fn_(fc1_output)
-                shared_output = shared_fc2.forward(act_result)
+                shared_output = shared_fc2.forward(act_result, self.base_layer_.fc2(act_result))
 
                 # Weighted normalization
                 routing_weights_sum = torch.sum(expert_mask, dim=-1, keepdim=True)
@@ -271,10 +285,10 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
             shared_down = self.shared_experts.get('down_proj', None)
 
             if shared_gate_up is not None and shared_down is not None:
-                gate_up_output = shared_gate_up.forward(hidden_states)
+                gate_up_output = shared_gate_up.forward(hidden_states, common_gate_up)
                 gate_output, up_output = gate_up_output.chunk(2, dim=-1)
                 act_result = up_output * self.act_fn_(gate_output)
-                shared_output = shared_down.forward(act_result)
+                shared_output = shared_down.forward(act_result, self.base_layer_.down_proj(act_result))
 
                 # Weighted normalization
                 routing_weights_sum = torch.sum(expert_mask, dim=-1, keepdim=True)

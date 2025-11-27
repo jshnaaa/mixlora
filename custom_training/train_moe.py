@@ -418,7 +418,7 @@ def main():
     parser.add_argument("--jitter_noise", type=float, default=0.0, help="Jitter noise for routing")
 
     # Shared expert configuration
-    parser.add_argument("--use_shared_expert", type=bool, default=True, help="Whether to use shared expert")
+    parser.add_argument("--use_shared_expert", type=lambda x: x.lower() in ['true', '1', 'yes'], default=True, help="Whether to use shared expert")
 
     # LoRA configuration
     parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
