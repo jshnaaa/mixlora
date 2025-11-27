@@ -365,16 +365,9 @@ def _inject_moe_mlp_module(layer_idx: int, mlp_layer, config: MoEConfig, weights
 
                 # Create LoRA layer
                 lora_layer = LoraLinear(
-                    base_proj.in_features,
-                    base_proj.out_features,
-                    r=config.lora_r_,
-                    lora_alpha=config.lora_alpha_,
-                    lora_dropout=config.lora_dropout_,
-                    bias=base_proj.bias is not None,
-                    use_dora=config.use_dora_,
-                    use_rslora=config.use_rslora_,
-                    device=base_proj.weight.device,
-                    dtype=base_proj.weight.dtype
+                    base_layer=base_proj,
+                    config=config,
+                    device=base_proj.weight.device
                 )
 
                 # Load weights if available
@@ -385,7 +378,7 @@ def _inject_moe_mlp_module(layer_idx: int, mlp_layer, config: MoEConfig, weights
                     lora_layer.reset_parameters((weights[lora_a_key], weights[lora_b_key]))
                 else:
                     # Use default initialization (same as routed experts)
-                    lora_layer.reset_parameters()
+                    lora_layer.reset_parameters((None, None))
 
                 # Add to MoE layer
                 moe_layer.experts_[expert_key] = lora_layer

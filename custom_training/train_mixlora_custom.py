@@ -99,6 +99,7 @@ class CustomTrainingArguments:
     pretrained_lora_path: Optional[str] = field(default=None, metadata={"help": "Path to pretrained LoRA model to freeze"})
     freeze_base_model: bool = field(default=False, metadata={"help": "Whether to freeze base model parameters"})
     train_mixlora_only: bool = field(default=False, metadata={"help": "Only train MixLoRA components (router + experts)"})
+    skip_lora_autodetect: bool = field(default=False, metadata={"help": "Skip automatic LoRA path detection"})
 
 
 class BestModelTracker(TrainerCallback):
