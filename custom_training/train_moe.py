@@ -88,8 +88,8 @@ class MoETrainingArguments:
     # Training configuration
     output_dir: str = field(default="./moe_output", metadata={"help": "Output directory"})
     max_length: int = field(default=512, metadata={"help": "Maximum sequence length"})
-    batch_size: int = field(default=4, metadata={"help": "Training batch size"})
-    gradient_accumulation_steps: int = field(default=8, metadata={"help": "Gradient accumulation steps"})
+    batch_size: int = field(default=1, metadata={"help": "Training batch size"})
+    gradient_accumulation_steps: int = field(default=16, metadata={"help": "Gradient accumulation steps"})
     learning_rate: float = field(default=1e-4, metadata={"help": "Learning rate"})
     num_epochs: int = field(default=3, metadata={"help": "Number of training epochs"})
     warmup_ratio: float = field(default=0.1, metadata={"help": "Warmup ratio"})
@@ -122,6 +122,9 @@ class MoETrainer:
         # Setup logging
         self.setup_logging()
 
+        # Get dataset configuration
+        self.dataset_config = self._get_dataset_config()
+
     def setup_logging(self):
         """Setup logging configuration."""
         logging.basicConfig(
@@ -129,6 +132,41 @@ class MoETrainer:
             datefmt="%m/%d/%Y %H:%M:%S",
             level=logging.INFO,
         )
+
+    def _get_dataset_config(self) -> Dict[str, str]:
+        """Get dataset configuration based on data_id."""
+        configs = {
+            0: {
+                "path": "/root/autodl-fs/unified_all_datasets_small_merge_gen.json",
+                "tag": "unified_small",
+                "name": "unified_all_datasets_small"
+            },
+            1: {
+                "path": "/root/autodl-fs/unified_all_datasets_merge_gen.json",
+                "tag": "unified",
+                "name": "unified_all_datasets"
+            },
+            2: {
+                "path": "/root/autodl-fs/CulturalBench_merge_gen.json",
+                "tag": "CulturalBench",
+                "name": "CulturalBench"
+            },
+            3: {
+                "path": "/root/autodl-fs/normad_merge_gen.json",
+                "tag": "normad",
+                "name": "normad"
+            },
+            4: {
+                "path": "/root/autodl-fs/cultureLLM_merge_gen.json",
+                "tag": "cultureLLM",
+                "name": "cultureLLM"
+            }
+        }
+
+        if self.args.data_id not in configs:
+            raise ValueError(f"Unsupported data_id: {self.args.data_id}. Supported values: {list(configs.keys())}")
+
+        return configs[self.args.data_id]
 
     def setup_model_and_tokenizer(self):
         """Setup model and tokenizer."""
@@ -298,12 +336,14 @@ class MoETrainer:
     def setup_datasets(self):
         """Setup datasets for training."""
         logger.info(f"Loading dataset with ID: {self.args.data_id}")
+        logger.info(f"Dataset path: {self.dataset_config['path']}")
 
         # Create dataset
         dataset = ChoiceQuestionDataset(
-            data_id=self.args.data_id,
+            data_path=self.dataset_config['path'],
             tokenizer=self.tokenizer,
-            max_length=self.args.max_length
+            max_length=self.args.max_length,
+            choice_range=None  # Auto-detect
         )
 
         # Split dataset (8:1:1 for train:val:test)
@@ -344,6 +384,7 @@ class MoETrainer:
             report_to=["wandb"] if self.args.wandb_project else [],
             run_name=self.args.run_name,
             fp16=True,
+            gradient_checkpointing=True,
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             ddp_find_unused_parameters=False,

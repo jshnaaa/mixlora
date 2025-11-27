@@ -79,8 +79,8 @@ class CustomTrainingArguments:
 
     # Training parameters
     max_length: int = field(default=512, metadata={"help": "Maximum sequence length"})
-    batch_size: int = field(default=4, metadata={"help": "Training batch size"})
-    gradient_accumulation_steps: int = field(default=4, metadata={"help": "Gradient accumulation steps"})
+    batch_size: int = field(default=1, metadata={"help": "Training batch size"})
+    gradient_accumulation_steps: int = field(default=16, metadata={"help": "Gradient accumulation steps"})
     learning_rate: float = field(default=1e-4, metadata={"help": "Learning rate"})
     num_epochs: int = field(default=3, metadata={"help": "Number of training epochs"})
     warmup_ratio: float = field(default=0.1, metadata={"help": "Warmup ratio"})
@@ -1039,6 +1039,8 @@ class CustomMixLoRATrainer:
             bf16=use_bf16,
             fp16=use_fp16,
             # Memory optimization settings
+            gradient_checkpointing=True,
+            dataloader_pin_memory=False,
             **memory_optimization,
             report_to=None,  # Disable wandb for now
             # GPU settings - force single device when num_gpu=1
