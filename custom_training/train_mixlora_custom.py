@@ -63,7 +63,7 @@ class CustomTrainingArguments:
     num_gpu: int = field(default=2, metadata={"help": "Number of GPUs to use (1=single, 2=dual)"})
 
     # MixLoRA parameters
-    num_experts: int = field(default=8, metadata={"help": "Number of experts"})
+    num_experts: int = field(default=2, metadata={"help": "Number of experts"})
     top_k: int = field(default=2, metadata={"help": "Top-k routing"})
     routing_strategy: str = field(default="mixlora", metadata={"help": "Routing strategy"})
     router_aux_loss_coef: float = field(default=0.01, metadata={"help": "Router auxiliary loss coefficient"})
@@ -71,7 +71,7 @@ class CustomTrainingArguments:
     jitter_noise: float = field(default=0.0, metadata={"help": "Jitter noise"})
 
     # LoRA parameters
-    lora_r: int = field(default=8, metadata={"help": "LoRA rank"})
+    lora_r: int = field(default=2, metadata={"help": "LoRA rank"})
     lora_alpha: int = field(default=16, metadata={"help": "LoRA alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout"})
     use_dora: bool = field(default=False, metadata={"help": "Use DoRA"})
@@ -80,7 +80,7 @@ class CustomTrainingArguments:
     # Training parameters
     max_length: int = field(default=512, metadata={"help": "Maximum sequence length"})
     batch_size: int = field(default=1, metadata={"help": "Training batch size"})
-    gradient_accumulation_steps: int = field(default=16, metadata={"help": "Gradient accumulation steps"})
+    gradient_accumulation_steps: int = field(default=32, metadata={"help": "Gradient accumulation steps"})
     learning_rate: float = field(default=1e-4, metadata={"help": "Learning rate"})
     num_epochs: int = field(default=3, metadata={"help": "Number of training epochs"})
     warmup_ratio: float = field(default=0.1, metadata={"help": "Warmup ratio"})
@@ -342,8 +342,8 @@ class CustomMixLoRATrainer:
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
                 device_map={"": target_device},  # Force model to load on specific device
-                max_memory={target_device: "40GiB"},  # Limit memory usage per device
-                offload_folder=None,  # Disable offloading
+                max_memory={target_device: "47GiB"},  # Increase memory limit for 48GB GPUs
+                offload_folder="./cpu_offload",  # Enable CPU offloading to save GPU memory
             )
         else:
             # Single GPU loading
@@ -990,7 +990,7 @@ class CustomMixLoRATrainer:
                 "gradient_checkpointing": True,
                 "dataloader_pin_memory": False,
                 "max_grad_norm": 1.0,
-                "optim": "adamw_torch",
+                "optim": "adamw_8bit",
                 "save_safetensors": True,
                 "dataloader_num_workers": 0,
                 "remove_unused_columns": False,  # Keep choice_answer for evaluation
@@ -1005,7 +1005,7 @@ class CustomMixLoRATrainer:
                 "gradient_checkpointing": True,
                 "dataloader_pin_memory": False,
                 "max_grad_norm": 1.0,
-                "optim": "adamw_torch",
+                "optim": "adamw_8bit",
                 "save_safetensors": True,
                 "dataloader_num_workers": 0,
                 "remove_unused_columns": False,  # Keep for evaluation

@@ -184,10 +184,11 @@ class MoETrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Load base model
+        # Note: Don't use device_map="auto" with torchrun/DDP as it conflicts
         self.model = AutoModelForCausalLM.from_pretrained(
             self.args.base_model,
             torch_dtype=torch.float16,
-            device_map="auto" if self.args.num_gpu > 1 else None,
+            device_map=None,  # Let DDP handle device placement
             trust_remote_code=True
         )
 
@@ -214,6 +215,13 @@ class MoETrainer:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
+
+        # Ensure model is on correct device for DDP
+        if torch.cuda.is_available():
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            device = torch.device(f"cuda:{local_rank}")
+            self.model = self.model.to(device)
+            logger.info(f"Model moved to device: {device}")
 
         logger.info("Model setup completed successfully")
 
@@ -388,6 +396,8 @@ class MoETrainer:
             dataloader_pin_memory=False,
             remove_unused_columns=False,
             ddp_find_unused_parameters=False,
+            ddp_backend="nccl",
+            ddp_broadcast_buffers=False,
         )
 
         # Create data collator
