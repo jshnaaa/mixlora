@@ -78,6 +78,9 @@ class MoETrainingArguments:
     # Shared expert configuration
     use_shared_expert: bool = field(default=True, metadata={"help": "Whether to use shared expert"})
 
+    # Parameter freezing configuration
+    train_moe_only: bool = field(default=False, metadata={"help": "Only train MoE components (router + shared experts + routing experts)"})
+
     # LoRA configuration
     lora_r: int = field(default=8, metadata={"help": "LoRA rank"})
     lora_alpha: int = field(default=16, metadata={"help": "LoRA alpha"})
@@ -209,12 +212,8 @@ class MoETrainer:
         logger.info("Injecting MoE adapters with shared expert support...")
         self.model = inject_moe_adapter_in_model(self.model, moe_config, weights)
 
-        # Enable gradient computation for LoRA parameters
-        for name, param in self.model.named_parameters():
-            if any(keyword in name for keyword in ["lora_A", "lora_B", "gate", "shared_expert"]):
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        # Configure parameter freezing based on training mode
+        self._freeze_parameters()
 
         # Ensure model is on correct device for DDP
         if torch.cuda.is_available():
@@ -340,6 +339,67 @@ class MoETrainer:
                         )
 
         return weights
+
+    def _freeze_parameters(self):
+        """Freeze specified parameters based on training mode."""
+        frozen_count = 0
+        trainable_count = 0
+
+        if self.args.train_moe_only:
+            logger.info("🔒 Training MoE components only (router + shared experts + routing experts), freezing all others")
+
+            for name, param in self.model.named_parameters():
+                # Only train MoE components: router, routing experts LoRA, shared experts LoRA
+                # Keep trainable: moe_gate (router), experts.*.lora_A, experts.*.lora_B, shared_expert.*.lora_A, shared_expert.*.lora_B
+                is_moe_component = (
+                    ('moe_gate' in name) or  # Router
+                    ('experts' in name and any(lora_part in name for lora_part in ['lora_A', 'lora_B'])) or  # Routing experts LoRA
+                    ('shared_expert' in name and any(lora_part in name for lora_part in ['lora_A', 'lora_B']))  # Shared experts LoRA
+                )
+
+                if is_moe_component:
+                    param.requires_grad = True
+                    trainable_count += 1
+                    logger.debug(f"  ✓ Trainable: {name}")
+                else:
+                    param.requires_grad = False
+                    frozen_count += 1
+                    logger.debug(f"  ❄️  Frozen: {name}")
+        else:
+            logger.info("🔓 Training all LoRA parameters and MoE components")
+
+            for name, param in self.model.named_parameters():
+                # Train all LoRA and MoE components
+                if any(keyword in name for keyword in ["lora_A", "lora_B", "moe_gate", "shared_expert"]):
+                    param.requires_grad = True
+                    trainable_count += 1
+                else:
+                    param.requires_grad = False
+                    frozen_count += 1
+
+        logger.info(f"📊 Parameter status: {trainable_count} trainable, {frozen_count} frozen")
+
+        # Log trainable parameters for verification
+        trainable_params = []
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                trainable_params.append(name)
+
+        if trainable_params:
+            logger.info("🎯 Trainable parameters:")
+            for param_name in trainable_params[:10]:  # Show first 10
+                logger.info(f"  ✓ {param_name}")
+            if len(trainable_params) > 10:
+                logger.info(f"  ... and {len(trainable_params) - 10} more")
+
+        # Calculate memory savings
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params_count = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        frozen_params_count = total_params - trainable_params_count
+
+        logger.info(f"💾 Memory savings: {frozen_params_count:,} / {total_params:,} parameters frozen ({frozen_params_count/total_params*100:.1f}%)")
+
+        return trainable_count, frozen_count
 
     def setup_datasets(self):
         """Setup datasets for training."""
@@ -470,6 +530,9 @@ def main():
 
     # Shared expert configuration
     parser.add_argument("--use_shared_expert", type=lambda x: x.lower() in ['true', '1', 'yes'], default=True, help="Whether to use shared expert")
+
+    # Parameter freezing configuration
+    parser.add_argument("--train_moe_only", action="store_true", help="Only train MoE components (router + shared experts + routing experts)")
 
     # LoRA configuration
     parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")

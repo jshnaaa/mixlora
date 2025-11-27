@@ -168,8 +168,8 @@ if [ -n "$LORA_WEIGHTS_PATH" ]; then
     echo "Using LoRA weights: $LORA_WEIGHTS_PATH"
 
     if [ -e "$LORA_WEIGHTS_PATH" ]; then
-        MOE_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\" --use_shared_expert $USE_SHARED"
-        echo "Will train all LoRA adapters and MoE components (routed + shared experts)"
+        MOE_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\" --train_moe_only --use_shared_expert $USE_SHARED"
+        echo "Will freeze pretrained LoRA and only train MoE components (router + shared experts + routing experts)"
     else
         echo "Warning: LoRA path not found, will use auto-detection in Python"
         MOE_ARGS="--use_shared_expert $USE_SHARED"

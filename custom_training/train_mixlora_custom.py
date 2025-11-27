@@ -683,7 +683,22 @@ class CustomMixLoRATrainer:
         frozen_count = 0
         trainable_count = 0
 
-        if self.args.freeze_base_model:
+        if self.args.train_mixlora_only:
+            self.logger.info("🔒 Training MixLoRA MoE components only (experts + router), freezing all others")
+
+            for name, param in self.model.named_parameters():
+                # Only train MixLoRA MoE components: experts LoRA + router
+                # Keep trainable: moe_gate (router), experts.*.lora_A, experts.*.lora_B
+                if any(component in name for component in ['moe_gate', 'experts']) and any(lora_part in name for lora_part in ['lora_A', 'lora_B', 'moe_gate']):
+                    param.requires_grad = True
+                    trainable_count += 1
+                    self.logger.debug(f"  ✓ Trainable: {name}")
+                else:
+                    param.requires_grad = False
+                    frozen_count += 1
+                    self.logger.debug(f"  ❄️  Frozen: {name}")
+
+        elif self.args.freeze_base_model:
             self.logger.info("🔒 Freezing base model parameters, keeping LoRA trainable")
 
             for name, param in self.model.named_parameters():

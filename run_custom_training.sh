@@ -180,8 +180,8 @@ case $TRAINING_MODE in
             echo "Using LoRA weights: $LORA_WEIGHTS_PATH"
 
             if [ -e "$LORA_WEIGHTS_PATH" ]; then
-                MIXLORA_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\""
-                echo "Will train all LoRA adapters and MixLoRA components (not freezing)"
+                MIXLORA_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\" --train_mixlora_only"
+                echo "Will freeze pretrained LoRA and only train MixLoRA MoE components (experts + router)"
             else
                 echo "Warning: LoRA path not found, training from scratch without pretrained weights"
                 MIXLORA_ARGS="--skip_lora_autodetect"
