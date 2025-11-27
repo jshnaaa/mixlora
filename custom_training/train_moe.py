@@ -104,7 +104,7 @@ class MoETrainingArguments:
     num_gpu: int = field(default=2, metadata={"help": "Number of GPUs"})
 
     # Experiment tracking
-    wandb_project: str = field(default="moe-cultural-datasets", metadata={"help": "Wandb project name"})
+    wandb_project: Optional[str] = field(default=None, metadata={"help": "Wandb project name"})
     run_name: str = field(default="", metadata={"help": "Run name"})
 
 
@@ -487,7 +487,7 @@ def main():
     parser.add_argument("--num_gpu", type=int, default=2, help="Number of GPUs")
 
     # Experiment tracking
-    parser.add_argument("--wandb_project", type=str, default="moe-cultural-datasets", help="Wandb project name")
+    parser.add_argument("--wandb_project", type=str, default=None, help="Wandb project name")
     parser.add_argument("--run_name", type=str, default="", help="Run name")
 
     args = parser.parse_args()

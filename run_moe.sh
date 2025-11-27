@@ -142,9 +142,18 @@ EVAL_INTERVAL=1  # Evaluate every epoch
 SAVE_STEPS=500
 LOGGING_STEPS=10
 
-# Experiment tracking (optional)
-WANDB_PROJECT="moe-cultural-datasets"
+# Experiment tracking (optional) - disabled by default
+WANDB_PROJECT=""  # Empty to disable wandb
 RUN_NAME="moe-data${DATA_ID}-$(date +%Y%m%d_%H%M%S)"
+
+# Configure wandb arguments
+if [ -n "$WANDB_PROJECT" ]; then
+    WANDB_ARGS="--wandb_project \"$WANDB_PROJECT\" --run_name \"$RUN_NAME\""
+    echo "Wandb tracking enabled: $WANDB_PROJECT"
+else
+    WANDB_ARGS=""
+    echo "Wandb tracking disabled"
+fi
 
 echo "Starting MoE training on cultural dataset..."
 echo "Backbone: $BACKBONE"
@@ -206,8 +215,7 @@ if [ "$GPU_CONFIG" = "single" ]; then
         --eval_interval $EVAL_INTERVAL \
         --save_steps $SAVE_STEPS \
         --logging_steps $LOGGING_STEPS \
-        --wandb_project "$WANDB_PROJECT" \
-        --run_name "$RUN_NAME" \
+        $WANDB_ARGS \
         $MOE_ARGS
 else
     echo "Running multi-GPU MoE training with torchrun (DDP)..."
@@ -236,8 +244,7 @@ else
         --eval_interval $EVAL_INTERVAL \
         --save_steps $SAVE_STEPS \
         --logging_steps $LOGGING_STEPS \
-        --wandb_project "$WANDB_PROJECT" \
-        --run_name "$RUN_NAME" \
+        $WANDB_ARGS \
         $MOE_ARGS
 fi
 

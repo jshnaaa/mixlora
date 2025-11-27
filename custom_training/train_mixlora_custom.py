@@ -1039,8 +1039,6 @@ class CustomMixLoRATrainer:
             bf16=use_bf16,
             fp16=use_fp16,
             # Memory optimization settings
-            gradient_checkpointing=True,
-            dataloader_pin_memory=False,
             **memory_optimization,
             report_to=None,  # Disable wandb for now
             # GPU settings - force single device when num_gpu=1
