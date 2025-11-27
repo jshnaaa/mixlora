@@ -454,19 +454,21 @@ class CustomMixLoRATrainer:
         if self.args.pretrained_lora_path:
             self.logger.info(f"Pretrained LoRA path provided: {self.args.pretrained_lora_path}")
             self._load_pretrained_lora()
-        elif self.args.train_mixlora_only:
-            # Auto-determine pretrained LoRA path for MixLoRA-only training if not specified
+            self.logger.info("Will train all LoRA adapters and MixLoRA components (not freezing base model)")
+        else:
+            # Auto-determine pretrained LoRA path if not specified
             auto_lora_path = self._get_lora_weights_path()
             if auto_lora_path:
                 self.args.pretrained_lora_path = auto_lora_path
                 self.logger.info(f"Auto-determined LoRA weights path: {auto_lora_path}")
                 self._load_pretrained_lora()
+                self.logger.info("Will train all LoRA adapters and MixLoRA components (not freezing base model)")
             else:
-                self.logger.warning(f"Could not auto-determine LoRA weights path for data_id={self.args.data_id}, backbone={self.args.backbone}")
-                self.logger.warning("Proceeding with MixLoRA-only training without pretrained LoRA weights")
+                self.logger.info("No pretrained LoRA weights found, training MixLoRA from scratch")
 
-        # Freeze parameters if requested
-        if self.args.freeze_base_model or self.args.train_mixlora_only:
+        # Only freeze base model if explicitly requested (not in MixLoRA training mode)
+        if self.args.freeze_base_model:
+            self.logger.info("Freezing base model parameters as requested")
             self._freeze_parameters()
 
         # Verify all components are on the correct device
@@ -667,23 +669,7 @@ class CustomMixLoRATrainer:
         frozen_count = 0
         trainable_count = 0
 
-        if self.args.train_mixlora_only:
-            self.logger.info("🔒 MIXLORA-ONLY MODE: Freezing all parameters except MixLoRA components")
-
-            # Freeze ALL parameters first
-            for param in self.model.parameters():
-                param.requires_grad = False
-                frozen_count += 1
-
-            # Then unfreeze only MixLoRA components
-            for name, param in self.model.named_parameters():
-                # Unfreeze MixLoRA router and expert parameters
-                if any(component in name for component in ['moe_gate', 'experts', 'mixlora']):
-                    param.requires_grad = True
-                    frozen_count -= 1
-                    trainable_count += 1
-
-        elif self.args.freeze_base_model:
+        if self.args.freeze_base_model:
             self.logger.info("🔒 Freezing base model parameters, keeping LoRA trainable")
 
             for name, param in self.model.named_parameters():

@@ -6,7 +6,7 @@
 # BACKBONE: llama (default) | qwen
 # DATA_ID: 2 (culturalbench, default) | 3 (normad) | 0 (unified_small) | 1 (unified) | 4 (cultureLLM)
 # NUM_GPU: 2 (dual-GPU, default) | 1 (single-GPU)
-# TRAINING_MODE: full (full model training) | mixlora (default, MixLoRA-only with auto LoRA path detection)
+# TRAINING_MODE: full (full model training) | mixlora (default, MixLoRA training with auto LoRA path detection)
 
 # Parse command line arguments
 BACKBONE=${1:-"llama"}  # Default to llama
@@ -174,21 +174,22 @@ case $TRAINING_MODE in
         MIXLORA_ARGS=""
         ;;
     "mixlora")
-        echo "🔒 MixLoRA-only training mode with auto LoRA path detection"
+        echo "🎯 MixLoRA training mode with auto LoRA path detection"
 
         if [ -n "$LORA_WEIGHTS_PATH" ]; then
             echo "Using LoRA weights: $LORA_WEIGHTS_PATH"
 
             if [ -e "$LORA_WEIGHTS_PATH" ]; then
-                MIXLORA_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\" --train_mixlora_only"
+                MIXLORA_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\""
+                echo "Will train all LoRA adapters and MixLoRA components (not freezing)"
             else
                 echo "Warning: LoRA path not found, will use auto-detection in Python"
-                MIXLORA_ARGS="--train_mixlora_only"
+                MIXLORA_ARGS=""
             fi
         else
             echo "Error: No LoRA mapping found for backbone=$BACKBONE, data_id=$DATA_ID"
             echo "Will use auto-detection in Python"
-            MIXLORA_ARGS="--train_mixlora_only"
+            MIXLORA_ARGS=""
         fi
         ;;
     *)
@@ -283,10 +284,10 @@ echo "  ./run_custom_training.sh                         # Train with llama on c
 echo "  ./run_custom_training.sh llama 2 2 full         # Train with llama on culturalbench (dual-GPU, full mode)"
 echo "  ./run_custom_training.sh llama 2 1 full         # Train with llama on culturalbench (single-GPU, full mode)"
 echo ""
-echo "  # MixLoRA-only training with auto LoRA path detection (memory efficient):"
-echo "  ./run_custom_training.sh llama 2 2 mixlora      # MixLoRA-only with auto LoRA path (dual-GPU)"
-echo "  ./run_custom_training.sh llama 2 1 mixlora      # MixLoRA-only with auto LoRA path (single-GPU)"
-echo "  ./run_custom_training.sh qwen 3 2 mixlora       # MixLoRA-only with qwen on normad (dual-GPU)"
+echo "  # MixLoRA training with auto LoRA path detection:"
+echo "  ./run_custom_training.sh llama 2 2 mixlora      # MixLoRA training with auto LoRA path (dual-GPU)"
+echo "  ./run_custom_training.sh llama 2 1 mixlora      # MixLoRA training with auto LoRA path (single-GPU)"
+echo "  ./run_custom_training.sh qwen 3 2 mixlora       # MixLoRA training with qwen on normad (dual-GPU)"
 echo ""
 echo "  # Other dataset examples:"
 echo "  ./run_custom_training.sh qwen 2 2 full          # Train with qwen on culturalbench (dual-GPU, full mode)"
@@ -302,8 +303,8 @@ echo "  #   3: NormAD"
 echo "  #   4: CultureLLM"
 echo ""
 echo "  # Training modes:"
-echo "  #   full: Complete model training (default)"
-echo "  #   mixlora: MixLoRA-only training with auto LoRA path detection (memory efficient)"
+echo "  #   full: Complete model training"
+echo "  #   mixlora: MixLoRA training with auto LoRA path detection (default, trains all LoRA + MixLoRA components)"
 echo ""
 echo "Check the output directory for:"
 echo "- best_model/: Best model adapter weights"
