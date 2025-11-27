@@ -45,7 +45,7 @@ from mixlora.config import MixLoraConfig
 from mixlora.model import load_adapter_weights
 from moe.moe_config import MoEConfig
 from moe.moe_model import inject_moe_adapter_in_model
-from dataset import ChoiceQuestionDataset, ChoiceQuestionCollator
+from custom_training.dataset import ChoiceQuestionDataset, ChoiceQuestionCollator
 
 
 # Configure logging
