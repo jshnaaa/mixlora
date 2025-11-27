@@ -453,18 +453,29 @@ class CustomMixLoRATrainer:
         # Load pretrained LoRA weights if specified
         if self.args.pretrained_lora_path:
             self.logger.info(f"Pretrained LoRA path provided: {self.args.pretrained_lora_path}")
-            self._load_pretrained_lora()
-            self.logger.info("Will train all LoRA adapters and MixLoRA components (not freezing base model)")
-        else:
-            # Auto-determine pretrained LoRA path if not specified
-            auto_lora_path = self._get_lora_weights_path()
-            if auto_lora_path:
-                self.args.pretrained_lora_path = auto_lora_path
-                self.logger.info(f"Auto-determined LoRA weights path: {auto_lora_path}")
+            if os.path.exists(self.args.pretrained_lora_path):
                 self._load_pretrained_lora()
                 self.logger.info("Will train all LoRA adapters and MixLoRA components (not freezing base model)")
             else:
-                self.logger.info("No pretrained LoRA weights found, training MixLoRA from scratch")
+                self.logger.warning(f"Provided LoRA path does not exist: {self.args.pretrained_lora_path}")
+                self.logger.info("Training MixLoRA from scratch without pretrained weights")
+                self.args.pretrained_lora_path = None
+        else:
+            # Check if auto-detection is explicitly skipped
+            if hasattr(self.args, 'skip_lora_autodetect') and self.args.skip_lora_autodetect:
+                self.logger.info("LoRA auto-detection skipped by user request, training MixLoRA from scratch")
+                self.args.pretrained_lora_path = None
+            else:
+                # Auto-determine pretrained LoRA path if not specified
+                auto_lora_path = self._get_lora_weights_path()
+                if auto_lora_path and os.path.exists(auto_lora_path):
+                    self.args.pretrained_lora_path = auto_lora_path
+                    self.logger.info(f"Auto-determined LoRA weights path: {auto_lora_path}")
+                    self._load_pretrained_lora()
+                    self.logger.info("Will train all LoRA adapters and MixLoRA components (not freezing base model)")
+                else:
+                    self.logger.info("No pretrained LoRA weights found, training MixLoRA from scratch")
+                    self.args.pretrained_lora_path = None
 
         # Only freeze base model if explicitly requested (not in MixLoRA training mode)
         if self.args.freeze_base_model:
@@ -602,9 +613,11 @@ class CustomMixLoRATrainer:
         self.logger.info(f"Is directory check: {os.path.isdir(self.args.pretrained_lora_path)}")
         self.logger.info(f"Is symlink check: {os.path.islink(self.args.pretrained_lora_path)}")
 
-        # Check if path exists at all
+        # Check if path exists - if not, log warning and continue without loading
         if not os.path.exists(self.args.pretrained_lora_path):
-            raise FileNotFoundError(f"Pretrained LoRA path does not exist: {self.args.pretrained_lora_path}")
+            self.logger.warning(f"Pretrained LoRA path does not exist: {self.args.pretrained_lora_path}")
+            self.logger.info("Continuing without pretrained LoRA weights - training from scratch")
+            return
 
         try:
             # Try to load as a complete model state dict
@@ -1232,6 +1245,7 @@ def main():
     parser.add_argument("--pretrained_lora_path", type=str, help="Path to pretrained LoRA model to load and freeze")
     parser.add_argument("--freeze_base_model", action="store_true", help="Freeze base model parameters")
     parser.add_argument("--train_mixlora_only", action="store_true", help="Only train MixLoRA components (router + experts)")
+    parser.add_argument("--skip_lora_autodetect", action="store_true", help="Skip automatic LoRA path detection, train from scratch")
 
     args = parser.parse_args()
 

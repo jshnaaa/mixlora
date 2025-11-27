@@ -183,13 +183,13 @@ case $TRAINING_MODE in
                 MIXLORA_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\""
                 echo "Will train all LoRA adapters and MixLoRA components (not freezing)"
             else
-                echo "Warning: LoRA path not found, will use auto-detection in Python"
-                MIXLORA_ARGS=""
+                echo "Warning: LoRA path not found, training from scratch without pretrained weights"
+                MIXLORA_ARGS="--skip_lora_autodetect"
             fi
         else
-            echo "Error: No LoRA mapping found for backbone=$BACKBONE, data_id=$DATA_ID"
-            echo "Will use auto-detection in Python"
-            MIXLORA_ARGS=""
+            echo "Warning: No LoRA mapping found for backbone=$BACKBONE, data_id=$DATA_ID"
+            echo "Training from scratch without pretrained weights"
+            MIXLORA_ARGS="--skip_lora_autodetect"
         fi
         ;;
     *)
