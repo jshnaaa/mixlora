@@ -109,6 +109,63 @@ class MoETrainingArguments:
     run_name: str = field(default="", metadata={"help": "Run name"})
 
 
+class BestMoEModelTracker(TrainerCallback):
+    """Callback to track and save the best MoE model based on validation accuracy."""
+
+    def __init__(self, trainer_instance):
+        self.best_accuracy = 0.0
+        self.best_model_path = None
+        self.trainer_instance = trainer_instance
+        self.eval_results = []
+
+    def on_evaluate(self, args, state, control, model, eval_dataloader, **kwargs):
+        """Called after evaluation."""
+        logger.info("Performing custom MoE evaluation with choice answer extraction...")
+
+        # Get validation metrics using detailed evaluation
+        val_metrics, val_results = self.trainer_instance.evaluate_on_dataset(
+            self.trainer_instance.eval_dataset, "Validation"
+        )
+        current_accuracy = val_metrics['accuracy']
+
+        # Save evaluation result
+        eval_result = {
+            'epoch': state.epoch,
+            'step': state.global_step,
+            'eval_accuracy': current_accuracy,
+            'eval_precision': val_metrics.get('precision', 0.0),
+            'eval_recall': val_metrics.get('recall', 0.0),
+            'eval_f1': val_metrics.get('f1', 0.0),
+        }
+        self.eval_results.append(eval_result)
+
+        # Log metrics for trainer (this will be used for best model selection)
+        kwargs['logs'] = kwargs.get('logs', {})
+        kwargs['logs']['eval_accuracy'] = current_accuracy
+        kwargs['logs']['eval_precision'] = val_metrics.get('precision', 0.0)
+        kwargs['logs']['eval_recall'] = val_metrics.get('recall', 0.0)
+        kwargs['logs']['eval_f1'] = val_metrics.get('f1', 0.0)
+
+        # Check if this is the best model so far
+        if current_accuracy > self.best_accuracy:
+            self.best_accuracy = current_accuracy
+
+            # Save the best model (only adapter weights)
+            best_model_dir = os.path.join(args.output_dir, "best_model")
+            os.makedirs(best_model_dir, exist_ok=True)
+
+            # Save adapter weights
+            self.trainer_instance.save_adapter_weights(best_model_dir)
+            self.best_model_path = best_model_dir
+
+            logger.info(f"New best MoE model saved with accuracy: {current_accuracy:.4f}")
+
+        # Save evaluation results
+        eval_results_path = os.path.join(args.output_dir, "validation_results.json")
+        with open(eval_results_path, 'w') as f:
+            json.dump(self.eval_results, f, indent=2)
+
+
 class MoETrainer:
     """MoE trainer with shared expert support."""
 
@@ -426,6 +483,45 @@ class MoETrainer:
 
         return trainable_count, frozen_count
 
+    def save_adapter_weights(self, save_path: str):
+        """Save only the adapter weights (not the full model)."""
+        os.makedirs(save_path, exist_ok=True)
+
+        # Extract adapter weights from the model
+        adapter_weights = {}
+
+        for name, param in self.model.named_parameters():
+            if any(adapter_name in name for adapter_name in ['lora_A', 'lora_B', 'moe_gate', 'experts', 'shared_expert']):
+                adapter_weights[name] = param.data.clone()
+
+        # Save adapter weights
+        torch.save(adapter_weights, os.path.join(save_path, "adapter_model.bin"))
+
+        # Save adapter config (create MoE config)
+        config_dict = {
+            "base_model_name_or_path": self.args.base_model,
+            "task_type": "CAUSAL_LM",
+            "peft_type": "MOE",
+            "r": self.args.lora_r,
+            "lora_alpha": self.args.lora_alpha,
+            "lora_dropout": self.args.lora_dropout,
+            "use_dora": self.args.use_dora,
+            "use_rslora": self.args.use_rslora,
+            "routing_strategy": self.args.routing_strategy,
+            "num_experts": self.args.num_experts,
+            "top_k": self.args.top_k,
+            "router_aux_loss_coef": self.args.router_aux_loss_coef,
+            "router_init_range": self.args.router_init_range,
+            "jitter_noise": self.args.jitter_noise,
+            "use_shared_expert": self.args.use_shared_expert,
+        }
+
+        config_path = os.path.join(save_path, "adapter_config.json")
+        with open(config_path, 'w') as f:
+            json.dump(config_dict, f, indent=2)
+
+        logger.info(f"MoE adapter weights saved to {save_path}")
+
     def setup_datasets(self):
         """Setup datasets for training."""
         logger.info(f"Loading dataset with ID: {self.args.data_id}")
@@ -451,6 +547,127 @@ class MoETrainer:
         )
 
         logger.info(f"Dataset split - Train: {len(self.train_dataset)}, Val: {len(self.eval_dataset)}, Test: {len(self.test_dataset)}")
+
+        # Get choice range for later use
+        self.choice_range = dataset.choice_range
+        logger.info(f"Detected choice range: {self.choice_range}")
+
+    def extract_answer_from_generation(self, generated_text: str) -> Optional[str]:
+        """Extract answer choice from generated text."""
+        # Clean the text
+        generated_text = generated_text.strip()
+
+        # First try exact match with choice range
+        for choice in self.choice_range:
+            if generated_text == choice:
+                return choice
+
+        # Try to find digits in the text
+        import re
+        digits = re.findall(r'\d+', generated_text)
+        for digit in digits:
+            if digit in self.choice_range:
+                return digit
+
+        # If no valid choice found, return None
+        return None
+
+    def evaluate_on_dataset(self, dataset, dataset_name: str) -> Tuple[Dict[str, float], List[Dict]]:
+        """Evaluate model on a dataset and return metrics and detailed results."""
+        self.model.eval()
+
+        dataloader = DataLoader(
+            dataset,
+            batch_size=self.args.batch_size,
+            shuffle=False,
+            collate_fn=ChoiceQuestionCollator(self.tokenizer)
+        )
+
+        all_predictions = []
+        all_targets = []
+        detailed_results = []
+
+        with torch.no_grad():
+            for batch in dataloader:
+                # Get original data for each sample in batch
+                for i in range(len(batch['choice_answers'])):
+                    # Reconstruct instruction from input_ids
+                    input_ids = batch['input_ids'][i]
+                    labels = batch['labels'][i]
+                    instruction_length = (labels == -100).sum().item()
+                    instruction_ids = input_ids[:instruction_length]
+                    instruction = self.tokenizer.decode(instruction_ids, skip_special_tokens=True)
+
+                    # Generate response
+                    inputs = self.tokenizer(
+                        instruction,
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=self.args.max_length
+                    ).to(self.model.device)
+
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=10,
+                        temperature=0.1,
+                        do_sample=False,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                    )
+
+                    generated_text = self.tokenizer.decode(
+                        outputs[0][inputs['input_ids'].shape[1]:],
+                        skip_special_tokens=True
+                    ).strip()
+
+                    predicted_choice = self.extract_answer_from_generation(generated_text)
+                    target_choice = batch['choice_answers'][i]
+
+                    all_predictions.append(predicted_choice)
+                    all_targets.append(target_choice)
+
+                    # Store detailed result
+                    detailed_results.append({
+                        'instruction': instruction,
+                        'target': target_choice,
+                        'predicted': predicted_choice,
+                        'generated_text': generated_text,
+                        'correct': predicted_choice == target_choice
+                    })
+
+        # Calculate metrics
+        from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
+        # Handle None predictions by treating them as wrong
+        valid_predictions = []
+        valid_targets = []
+
+        for pred, target in zip(all_predictions, all_targets):
+            if pred is not None:
+                valid_predictions.append(pred)
+                valid_targets.append(target)
+            else:
+                # Treat None as a wrong prediction, use first choice as placeholder
+                valid_predictions.append(self.choice_range[0])
+                valid_targets.append(target)
+
+        # Calculate metrics
+        accuracy = accuracy_score(valid_targets, valid_predictions)
+        precision, recall, f1, support = precision_recall_fscore_support(
+            valid_targets, valid_predictions, average='macro', zero_division=0
+        )
+
+        metrics = {
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'total_samples': len(all_targets),
+            'valid_predictions': len([p for p in all_predictions if p is not None])
+        }
+
+        logger.info(f"{dataset_name} Results - Accuracy: {accuracy:.4f}, F1: {f1:.4f}")
+
+        return metrics, detailed_results
 
     def train(self):
         """Train the MoE model."""
@@ -508,6 +725,13 @@ class MoETrainer:
             compute_metrics=self.compute_metrics,
         )
 
+        # Add best model tracker callback
+        best_model_tracker = BestMoEModelTracker(self)
+        trainer.add_callback(best_model_tracker)
+
+        # Store reference for saving adapter weights
+        self.trainer = trainer
+
         # Aggressive memory cleanup before training
         import gc
         gc.collect()
@@ -530,37 +754,67 @@ class MoETrainer:
         # Train model
         trainer.train()
 
-        # Save final model
-        trainer.save_model(os.path.join(self.args.output_dir, "final_model"))
+        # Save final training config
+        config_path = os.path.join(self.args.output_dir, "training_config.json")
+        with open(config_path, 'w') as f:
+            json.dump(vars(self.args), f, indent=2)
 
-        # Evaluate on test set
-        test_results = trainer.evaluate(eval_dataset=self.test_dataset)
+        # Load best model and evaluate on test set
+        logger.info("Loading best model for test evaluation...")
 
-        # Save test results
-        with open(os.path.join(self.args.output_dir, "test_results.json"), "w") as f:
-            json.dump(test_results, f, indent=2)
+        if best_model_tracker.best_model_path:
+            # Load the best adapter weights
+            best_adapter_path = os.path.join(best_model_tracker.best_model_path, "adapter_model.bin")
+            if os.path.exists(best_adapter_path):
+                adapter_weights = torch.load(best_adapter_path, map_location=self.model.device)
 
-        logger.info("Training completed successfully!")
-        return test_results
+                # Load adapter weights into model
+                missing_keys, unexpected_keys = self.model.load_state_dict(adapter_weights, strict=False)
+                logger.info(f"Loaded best MoE model adapter weights")
+
+                # Evaluate on test set
+                test_metrics, test_results = self.evaluate_on_dataset(self.test_dataset, "Test")
+
+                # Save test results
+                test_results_path = os.path.join(self.args.output_dir, "test_results.json")
+                with open(test_results_path, 'w') as f:
+                    json.dump({
+                        'metrics': test_metrics,
+                        'detailed_results': test_results
+                    }, f, indent=2)
+
+                # Save generated answers for validation set
+                val_metrics, val_results = self.evaluate_on_dataset(self.eval_dataset, "Validation")
+                generated_answers_path = os.path.join(self.args.output_dir, "generated_answers.json")
+                with open(generated_answers_path, 'w') as f:
+                    json.dump(val_results, f, indent=2)
+
+                logger.info(f"Final test accuracy: {test_metrics['accuracy']:.4f}")
+                logger.info(f"Final test precision: {test_metrics['precision']:.4f}")
+                logger.info(f"Final test recall: {test_metrics['recall']:.4f}")
+                logger.info(f"Final test F1: {test_metrics['f1']:.4f}")
+                logger.info(f"Results saved to {self.args.output_dir}")
+
+                return test_metrics
+            else:
+                logger.error("Best model adapter weights not found!")
+                return {}
+        else:
+            logger.error("No best model was saved during training!")
+            return {}
 
     def compute_metrics(self, eval_pred):
-        """Compute evaluation metrics."""
+        """Compute evaluation metrics for Trainer (not used in our custom evaluation)."""
+        # This method is required by Trainer but not used in our custom evaluation
+        # Our custom evaluation is handled by BestMoEModelTracker callback
         predictions, labels = eval_pred
-        predictions = np.argmax(predictions, axis=1)
 
-        # Calculate accuracy
-        accuracy = accuracy_score(labels, predictions)
-
-        # Calculate precision, recall, F1
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            labels, predictions, average='weighted', zero_division=0
-        )
-
+        # For compatibility, return dummy metrics since we use custom evaluation
         return {
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
+            "eval_accuracy": 0.0,  # Will be overridden by callback
+            "eval_precision": 0.0,
+            "eval_recall": 0.0,
+            "eval_f1": 0.0,
         }
 
 
