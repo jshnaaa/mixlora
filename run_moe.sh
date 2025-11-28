@@ -171,13 +171,13 @@ if [ -n "$LORA_WEIGHTS_PATH" ]; then
         MOE_ARGS="--pretrained_lora_path \"$LORA_WEIGHTS_PATH\" --train_moe_only --use_shared_expert $USE_SHARED"
         echo "Will freeze pretrained LoRA and only train MoE components (router + shared experts + routing experts)"
     else
-        echo "Warning: LoRA path not found, will use auto-detection in Python"
-        MOE_ARGS="--use_shared_expert $USE_SHARED"
+        echo "Warning: LoRA path not found, will use auto-detection in Python with MoE-only training"
+        MOE_ARGS="--train_moe_only --use_shared_expert $USE_SHARED"
     fi
 else
-    echo "Error: No LoRA mapping found for backbone=$BACKBONE, data_id=$DATA_ID"
-    echo "Will use auto-detection in Python"
-    MOE_ARGS="--use_shared_expert $USE_SHARED"
+    echo "Warning: No LoRA mapping found for backbone=$BACKBONE, data_id=$DATA_ID"
+    echo "Will use auto-detection in Python with MoE-only training"
+    MOE_ARGS="--train_moe_only --use_shared_expert $USE_SHARED"
 fi
 
 # Check if base model exists

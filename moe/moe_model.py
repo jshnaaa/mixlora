@@ -120,7 +120,17 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
 
     def _llama_forward(self, expert_mask, hidden_states, input_dtype):
         """LLaMA forward with shared expert support."""
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        # Handle both 2D and 3D hidden_states
+        if len(hidden_states.shape) == 3:
+            batch_size, sequence_length, hidden_dim = hidden_states.shape
+            original_shape = (batch_size, sequence_length, hidden_dim)
+        elif len(hidden_states.shape) == 2:
+            batch_size, hidden_dim = hidden_states.shape
+            sequence_length = 1
+            original_shape = (batch_size, hidden_dim)
+        else:
+            raise ValueError(f"Unexpected hidden_states shape: {hidden_states.shape}")
+
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Get base layer outputs
@@ -185,11 +195,25 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
         else:
             final_output = routed_output
 
-        return final_output.view(batch_size, sequence_length, hidden_dim).to(input_dtype)
+        # Reshape back to original shape
+        if len(original_shape) == 3:
+            return final_output.view(batch_size, sequence_length, hidden_dim).to(input_dtype)
+        else:
+            return final_output.view(batch_size, hidden_dim).to(input_dtype)
 
     def _phi_forward(self, expert_mask, hidden_states, input_dtype):
         """Phi forward with shared expert support."""
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        # Handle both 2D and 3D hidden_states
+        if len(hidden_states.shape) == 3:
+            batch_size, sequence_length, hidden_dim = hidden_states.shape
+            original_shape = (batch_size, sequence_length, hidden_dim)
+        elif len(hidden_states.shape) == 2:
+            batch_size, hidden_dim = hidden_states.shape
+            sequence_length = 1
+            original_shape = (batch_size, hidden_dim)
+        else:
+            raise ValueError(f"Unexpected hidden_states shape: {hidden_states.shape}")
+
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Get base layer output
@@ -240,11 +264,25 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
         else:
             final_output = routed_output
 
-        return final_output.view(batch_size, sequence_length, hidden_dim).to(input_dtype)
+        # Reshape back to original shape
+        if len(original_shape) == 3:
+            return final_output.view(batch_size, sequence_length, hidden_dim).to(input_dtype)
+        else:
+            return final_output.view(batch_size, hidden_dim).to(input_dtype)
 
     def _phi3_forward(self, expert_mask, hidden_states, input_dtype):
         """Phi3 forward with shared expert support."""
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        # Handle both 2D and 3D hidden_states
+        if len(hidden_states.shape) == 3:
+            batch_size, sequence_length, hidden_dim = hidden_states.shape
+            original_shape = (batch_size, sequence_length, hidden_dim)
+        elif len(hidden_states.shape) == 2:
+            batch_size, hidden_dim = hidden_states.shape
+            sequence_length = 1
+            original_shape = (batch_size, hidden_dim)
+        else:
+            raise ValueError(f"Unexpected hidden_states shape: {hidden_states.shape}")
+
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Get base layer outputs
@@ -300,7 +338,11 @@ class MoEWithSharedExpert(MixLoraSparseMoe):
         else:
             final_output = routed_output
 
-        return final_output.view(batch_size, sequence_length, hidden_dim).to(input_dtype)
+        # Reshape back to original shape
+        if len(original_shape) == 3:
+            return final_output.view(batch_size, sequence_length, hidden_dim).to(input_dtype)
+        else:
+            return final_output.view(batch_size, hidden_dim).to(input_dtype)
 
 
 def inject_moe_adapter_in_model(model, config: MoEConfig, weights: Dict[str, torch.Tensor]):

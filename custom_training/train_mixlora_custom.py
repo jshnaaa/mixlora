@@ -15,9 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # Set memory optimization environment variables first
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-# CRITICAL: Disable automatic DataParallel at the very beginning
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # For debugging
 os.environ["TORCH_USE_CUDA_DSA"] = "1"     # Additional debugging
 
@@ -346,13 +344,15 @@ class CustomMixLoRATrainer:
                 offload_folder="./cpu_offload",  # Enable CPU offloading to save GPU memory
             )
         else:
-            # Single GPU loading
+            # Single GPU loading with memory optimization
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.args.base_model,
                 torch_dtype=model_dtype,
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
-                device_map={"": target_device}  # Force model to load on specific device
+                device_map={"": target_device},  # Force model to load on specific device
+                max_memory={target_device: "46GiB"},  # Conservative memory limit for single GPU
+                offload_folder="./cpu_offload",  # Enable CPU offloading to save GPU memory
             )
 
         self.model_dtype = model_dtype
@@ -478,9 +478,8 @@ class CustomMixLoRATrainer:
                     self.logger.info("No pretrained LoRA weights found, training MixLoRA from scratch")
                     self.args.pretrained_lora_path = None
 
-        # Only freeze base model if explicitly requested (not in MixLoRA training mode)
-        if self.args.freeze_base_model:
-            self.logger.info("Freezing base model parameters as requested")
+        # Apply parameter freezing if requested
+        if self.args.freeze_base_model or self.args.train_mixlora_only:
             self._freeze_parameters()
 
         # Verify all components are on the correct device
@@ -1125,13 +1124,16 @@ class CustomMixLoRATrainer:
 
         self.logger.info(f"✅ FINAL DEVICE CHECK PASSED - Ready for training!")
 
-        # Final memory cleanup before training
+        # Aggressive memory cleanup before training
+        import gc
+        gc.collect()
         torch.cuda.empty_cache()
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 with torch.cuda.device(i):
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
+                    torch.cuda.reset_peak_memory_stats(i)
 
         # Log memory usage before training
         if torch.cuda.is_available():

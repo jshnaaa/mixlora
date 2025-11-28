@@ -15,9 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # Set memory optimization environment variables first
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
-# CRITICAL: Disable automatic DataParallel at the very beginning
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"  # For debugging
 os.environ["TORCH_USE_CUDA_DSA"] = "1"     # Additional debugging
 
@@ -67,8 +65,8 @@ class MoETrainingArguments:
     base_model: str = field(default="", metadata={"help": "Path to base model"})
     pretrained_lora_path: Optional[str] = field(default=None, metadata={"help": "Path to pretrained LoRA weights"})
 
-    # MoE configuration
-    num_experts: int = field(default=8, metadata={"help": "Number of experts"})
+    # MoE configuration (optimized for memory efficiency)
+    num_experts: int = field(default=2, metadata={"help": "Number of experts"})
     top_k: int = field(default=2, metadata={"help": "Top-k experts to activate"})
     routing_strategy: str = field(default="mixlora", metadata={"help": "Routing strategy"})
     router_aux_loss_coef: float = field(default=0.01, metadata={"help": "Router auxiliary loss coefficient"})
@@ -79,10 +77,10 @@ class MoETrainingArguments:
     use_shared_expert: bool = field(default=True, metadata={"help": "Whether to use shared expert"})
 
     # Parameter freezing configuration
-    train_moe_only: bool = field(default=False, metadata={"help": "Only train MoE components (router + shared experts + routing experts)"})
+    train_moe_only: bool = field(default=True, metadata={"help": "Only train MoE components (router + shared experts + routing experts)"})
 
-    # LoRA configuration
-    lora_r: int = field(default=8, metadata={"help": "LoRA rank"})
+    # LoRA configuration (optimized for memory efficiency)
+    lora_r: int = field(default=2, metadata={"help": "LoRA rank"})
     lora_alpha: int = field(default=16, metadata={"help": "LoRA alpha"})
     lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout"})
     use_dora: bool = field(default=False, metadata={"help": "Use DoRA"})
@@ -186,14 +184,41 @@ class MoETrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load base model
-        # Note: Don't use device_map="auto" with torchrun/DDP as it conflicts
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.args.base_model,
-            torch_dtype=torch.float16,
-            device_map=None,  # Let DDP handle device placement
-            trust_remote_code=True
-        )
+        # Load base model with memory optimization
+        # Determine model dtype
+        if torch.cuda.is_bf16_supported():
+            model_dtype = torch.bfloat16
+            logger.info("Using bfloat16 for model weights")
+        else:
+            model_dtype = torch.float16
+            logger.info("Using float16 for model weights")
+
+        # Determine target device for model loading
+        if "LOCAL_RANK" in os.environ:
+            local_rank = int(os.environ["LOCAL_RANK"])
+            target_device = f"cuda:{local_rank}"
+            logger.info(f"DDP mode: loading model on {target_device}")
+            # For DDP, don't use device_map as it conflicts
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.args.base_model,
+                torch_dtype=model_dtype,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                device_map=None,  # Let DDP handle device placement
+            )
+        else:
+            target_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            logger.info(f"Single GPU mode: loading model on {target_device}")
+            # For single GPU, use memory optimization
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.args.base_model,
+                torch_dtype=model_dtype,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                device_map={"": target_device},
+                max_memory={target_device: "46GiB"},
+                offload_folder="./cpu_offload",
+            )
 
         # Create MoE config
         moe_config = self._create_moe_config()
@@ -451,12 +476,22 @@ class MoETrainer:
             greater_is_better=True,
             report_to=["wandb"] if self.args.wandb_project else [],
             run_name=self.args.run_name,
-            fp16=True,
+            # Memory optimization settings (same as train_mixlora_custom.py)
+            bf16=torch.cuda.is_bf16_supported(),
+            fp16=not torch.cuda.is_bf16_supported(),
             gradient_checkpointing=True,
             dataloader_pin_memory=False,
             remove_unused_columns=False,
+            prediction_loss_only=True,
+            skip_memory_metrics=True,
+            eval_accumulation_steps=1,
+            optim="adamw_8bit",
+            save_safetensors=True,
+            dataloader_num_workers=0,
+            max_grad_norm=1.0,
             ddp_find_unused_parameters=False,
             ddp_backend="nccl",
+            ddp_bucket_cap_mb=25,
             ddp_broadcast_buffers=False,
         )
 
@@ -472,6 +507,25 @@ class MoETrainer:
             data_collator=data_collator,
             compute_metrics=self.compute_metrics,
         )
+
+        # Aggressive memory cleanup before training
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                with torch.cuda.device(i):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    torch.cuda.reset_peak_memory_stats(i)
+
+        # Log memory usage before training
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                allocated = torch.cuda.memory_allocated(i) / 1024**3
+                cached = torch.cuda.memory_reserved(i) / 1024**3
+                total = torch.cuda.get_device_properties(i).total_memory / 1024**3
+                logger.info(f"GPU {i} Memory - Allocated: {allocated:.2f}GB, Cached: {cached:.2f}GB, Total: {total:.2f}GB")
 
         # Train model
         trainer.train()

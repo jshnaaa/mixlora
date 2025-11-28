@@ -123,15 +123,15 @@ MAX_LENGTH=512
 
 # Adjust batch size based on GPU configuration and training mode
 if [ "$TRAINING_MODE" = "mixlora" ]; then
-    # MixLoRA-only training: Can use larger batch sizes due to frozen parameters
+    # MixLoRA-only training: Use minimal batch sizes to avoid OOM
     if [ "$GPU_CONFIG" = "single" ]; then
-        BATCH_SIZE=8   # Larger batch size for MixLoRA-only training
-        GRADIENT_ACCUMULATION_STEPS=8  # Total effective batch size = 8 * 8 = 64
-        echo "Single-GPU (MixLoRA-only): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=64"
+        BATCH_SIZE=1   # Minimal batch size to avoid OOM
+        GRADIENT_ACCUMULATION_STEPS=32  # Total effective batch size = 1 * 32 = 32
+        echo "Single-GPU (MixLoRA-only): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=32"
     else
-        BATCH_SIZE=6   # Larger per device batch size for MixLoRA-only
-        GRADIENT_ACCUMULATION_STEPS=6  # Total effective batch size = 6 * 2 * 6 = 72
-        echo "Dual-GPU (MixLoRA-only): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=72"
+        BATCH_SIZE=1   # Minimal per device batch size for MixLoRA-only
+        GRADIENT_ACCUMULATION_STEPS=16  # Total effective batch size = 1 * 2 * 16 = 32
+        echo "Dual-GPU (MixLoRA-only): batch_size=$BATCH_SIZE, grad_accum=$GRADIENT_ACCUMULATION_STEPS, effective_batch=32"
     fi
 else
     # Full model training: Use conservative batch sizes
