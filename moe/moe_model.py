@@ -442,3 +442,6 @@ def _inject_moe_mlp_module(layer_idx: int, mlp_layer, config: MoEConfig, weights
 
     # Replace the original forward function
     mlp_layer.forward = moe_layer.forward
+
+    # Store reference to MoE layer for device synchronization
+    mlp_layer._moe_layer = moe_layer

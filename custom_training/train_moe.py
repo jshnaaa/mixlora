@@ -304,7 +304,49 @@ class MoETrainer:
             self.model = self.model.to(device)
             logger.info(f"Model moved to device: {device}")
 
+            # Ensure all MoE components are also on the correct device
+            self._sync_moe_components_to_device(device)
+
         logger.info("Model setup completed successfully")
+
+    def _sync_moe_components_to_device(self, device):
+        """Ensure all MoE components are on the correct device."""
+        logger.info(f"🔄 Syncing MoE components to device: {device}")
+
+        components_moved = 0
+        for layer_idx, layer in enumerate(self.model.model.layers):
+            if hasattr(layer.mlp, '_moe_layer'):
+                moe_layer = layer.mlp._moe_layer
+
+                # Move expert LoRA layers to device
+                for expert_key, expert_lora in moe_layer.experts_.items():
+                    if hasattr(expert_lora, 'lora_A'):
+                        expert_lora.lora_A = expert_lora.lora_A.to(device)
+                        components_moved += 1
+                    if hasattr(expert_lora, 'lora_B'):
+                        expert_lora.lora_B = expert_lora.lora_B.to(device)
+                        components_moved += 1
+
+                # Move shared expert components to device
+                if hasattr(moe_layer, 'shared_experts') and moe_layer.shared_experts:
+                    for shared_key, shared_expert in moe_layer.shared_experts.items():
+                        if hasattr(shared_expert, 'lora_A'):
+                            shared_expert.lora_A = shared_expert.lora_A.to(device)
+                            components_moved += 1
+                        if hasattr(shared_expert, 'lora_B'):
+                            shared_expert.lora_B = shared_expert.lora_B.to(device)
+                            components_moved += 1
+                        if hasattr(shared_expert, 'dropout'):
+                            shared_expert.dropout = shared_expert.dropout.to(device)
+                            components_moved += 1
+
+                # Move router gate to device if it exists
+                if hasattr(moe_layer, 'gate_') and moe_layer.gate_ is not None:
+                    if torch.is_tensor(moe_layer.gate_):
+                        moe_layer.gate_ = moe_layer.gate_.to(device)
+                        components_moved += 1
+
+        logger.info(f"✅ Moved {components_moved} MoE components to device: {device}")
 
     def _create_moe_config(self) -> MoEConfig:
         """Create MoE configuration."""

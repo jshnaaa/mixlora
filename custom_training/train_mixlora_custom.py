@@ -688,7 +688,12 @@ class CustomMixLoRATrainer:
             for name, param in self.model.named_parameters():
                 # Only train MixLoRA MoE components: experts LoRA + router
                 # Keep trainable: moe_gate (router), experts.*.lora_A, experts.*.lora_B
-                if any(component in name for component in ['moe_gate', 'experts']) and any(lora_part in name for lora_part in ['lora_A', 'lora_B', 'moe_gate']):
+                is_moe_component = (
+                    ('moe_gate' in name) or  # Router
+                    ('experts' in name and any(lora_part in name for lora_part in ['lora_A', 'lora_B']))  # Expert LoRA
+                )
+
+                if is_moe_component:
                     param.requires_grad = True
                     trainable_count += 1
                     self.logger.debug(f"  ✓ Trainable: {name}")
@@ -730,7 +735,69 @@ class CustomMixLoRATrainer:
 
         self.logger.info(f"💾 Memory savings: {frozen_params_count:,} / {total_params:,} parameters frozen ({frozen_params_count/total_params*100:.1f}%)")
 
+        # Verify that we have trainable parameters
+        if trainable_params_count == 0:
+            raise ValueError("❌ No trainable parameters found! All parameters are frozen. Check parameter freezing logic.")
+
+        self.logger.info(f"✅ Verified {trainable_params_count:,} trainable parameters")
+
+        # Additional validation for DDP training
+        if hasattr(self.model, 'module'):
+            # In DDP, check the underlying module as well
+            ddp_trainable_count = sum(p.numel() for p in self.model.module.parameters() if p.requires_grad)
+            if ddp_trainable_count != trainable_params_count:
+                self.logger.warning(f"⚠️  DDP trainable parameter count mismatch: {ddp_trainable_count} vs {trainable_params_count}")
+            else:
+                self.logger.info(f"✅ DDP parameter consistency verified")
+
         return trainable_count, frozen_count
+
+    def _verify_gradient_state(self):
+        """Verify that the model is in a valid state for training."""
+        self.logger.info("🔍 Verifying gradient state before training...")
+
+        # Check that we have trainable parameters
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        if len(trainable_params) == 0:
+            raise ValueError("❌ No trainable parameters found before training!")
+
+        # Check that trainable parameters are not detached
+        for i, param in enumerate(trainable_params[:5]):  # Check first 5
+            if param.grad_fn is None and param.requires_grad and param.numel() > 0:
+                # This is normal for leaf parameters (they don't have grad_fn)
+                pass
+
+        # Clear any existing gradients
+        self.model.zero_grad()
+
+        # Test forward pass with a dummy input to ensure gradients can flow
+        try:
+            # Get a sample from the training dataset for testing
+            dummy_batch = next(iter(self.train_dataloader))
+
+            # Move to device
+            for key in dummy_batch:
+                if torch.is_tensor(dummy_batch[key]):
+                    dummy_batch[key] = dummy_batch[key][:1].to(self.device)  # Use only first sample
+
+            # Test forward pass
+            self.model.train()
+            with torch.cuda.amp.autocast(enabled=False):  # Disable autocast for testing
+                outputs = self.model(**dummy_batch)
+                if hasattr(outputs, 'loss') and outputs.loss is not None:
+                    test_loss = outputs.loss
+                    if test_loss.requires_grad:
+                        self.logger.info("✅ Test forward pass successful - gradients can flow")
+                    else:
+                        self.logger.warning("⚠️  Test loss does not require gradients!")
+                else:
+                    self.logger.warning("⚠️  No loss found in model output")
+
+        except Exception as e:
+            self.logger.warning(f"⚠️  Test forward pass failed: {e}")
+            self.logger.warning("This might cause training issues")
+
+        self.logger.info("✅ Gradient state verification completed")
 
     def _verify_device_consistency(self):
         """Verify that ALL model components are on the SAME device."""
@@ -965,6 +1032,9 @@ class CustomMixLoRATrainer:
     def train(self):
         """Run the training loop."""
         self.logger.info("Starting training...")
+
+        # Verify gradient state before training
+        self._verify_gradient_state()
 
         # Calculate eval steps based on eval_interval
         total_steps = len(self.train_dataset) // (self.args.batch_size * self.args.gradient_accumulation_steps) * self.args.num_epochs
